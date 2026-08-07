@@ -52,6 +52,74 @@ command = "npx"
 args = ["-y", "agent-memoize-mcp"]
 ```
 
+**OpenCode** — `opencode.json` in the project root:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "agent-memoize": {
+        "type": "local",
+        "command": ["npx", "-y", "agent-memoize-mcp"]
+      }
+    }
+  }
+}
+```
+
+Or add it from the CLI: `opencode2 mcp add agent-memoize -- npx -y agent-memoize-mcp`.
+
+**Pi** — `.mcp.json` in the project (or `~/.config/mcp/mcp.json` for user scope). Pi reads the
+standard `mcpServers` format, so Claude Code's project config works as-is:
+
+```json
+{
+  "mcpServers": {
+    "agent-memoize": {
+      "command": "npx",
+      "args": ["-y", "agent-memoize-mcp"]
+    }
+  }
+}
+```
+
+**ZCode** — add via Settings → MCP Servers → New MCP Server (type `stdio`, command `npx`,
+args `-y agent-memoize-mcp`), or declare it in the workspace config `<project>/.zcode/config.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "agent-memoize": {
+        "command": "npx",
+        "args": ["-y", "agent-memoize-mcp"]
+      }
+    }
+  }
+}
+```
+
+ZCode also accepts the standard `mcpServers` structure in `<project>/.agents/mcp.json`, and can
+import existing servers from Claude Code, Codex, or OpenCode configs via the Import button on
+the MCP Servers page.
+
+**Kimi** — `~/.kimi-code/mcp.json` (user scope) or `<project>/.kimi-code/mcp.json` (project
+scope):
+
+```json
+{
+  "mcpServers": {
+    "agent-memoize": {
+      "command": "npx",
+      "args": ["-y", "agent-memoize-mcp"]
+    }
+  }
+}
+```
+
+Or add it from the CLI: `kimi mcp add agent-memoize -- npx -y agent-memoize-mcp`.
+
 **Any MCP client**: launch `agent-memoize` over stdio. The project root is resolved from
 `--root <dir>`, then `$MEMOIZE_ROOT`, then the process working directory.
 
@@ -63,8 +131,8 @@ args = ["-y", "agent-memoize-mcp"]
 
 ## Tell the agent how to use it
 
-MCP tools don't invoke themselves. Add this block to your project's `AGENTS.md` (Codex) or
-`CLAUDE.md` (Claude Code) so agents adopt the workflow:
+MCP tools don't invoke themselves. Add this block to your project's `AGENTS.md` — read by
+Codex, OpenCode, Pi, ZCode, and Kimi — or `CLAUDE.md` (Claude Code) so agents adopt the workflow:
 
 ```markdown
 ## Project memory (agent-memoize MCP)
