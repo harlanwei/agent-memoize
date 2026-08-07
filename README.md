@@ -26,7 +26,7 @@ compact — the store costs almost no context when unused.
 ## Install
 
 ```sh
-npm install -g agent-memoize-mcp        # or run it via npx (no install)
+npm install -g @naevic/agent-memoize        # or run it via npx (no install)
 ```
 
 ## Configure your agent
@@ -38,7 +38,7 @@ npm install -g agent-memoize-mcp        # or run it via npx (no install)
   "mcpServers": {
     "agent-memoize": {
       "command": "npx",
-      "args": ["-y", "agent-memoize-mcp"]
+      "args": ["-y", "@naevic/agent-memoize"]
     }
   }
 }
@@ -49,7 +49,7 @@ npm install -g agent-memoize-mcp        # or run it via npx (no install)
 ```toml
 [mcp_servers.agent-memoize]
 command = "npx"
-args = ["-y", "agent-memoize-mcp"]
+args = ["-y", "@naevic/agent-memoize"]
 ```
 
 **OpenCode** — `opencode.json` in the project root:
@@ -61,14 +61,14 @@ args = ["-y", "agent-memoize-mcp"]
     "servers": {
       "agent-memoize": {
         "type": "local",
-        "command": ["npx", "-y", "agent-memoize-mcp"]
+        "command": ["npx", "-y", "@naevic/agent-memoize"]
       }
     }
   }
 }
 ```
 
-Or add it from the CLI: `opencode2 mcp add agent-memoize -- npx -y agent-memoize-mcp`.
+Or add it from the CLI: `opencode2 mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
 
 **Pi** — install the `pi-mcp-adapter` extension first, then restart Pi:
 
@@ -85,14 +85,14 @@ automatically, so Claude Code's project config works as-is — `.mcp.json` in th
   "mcpServers": {
     "agent-memoize": {
       "command": "npx",
-      "args": ["-y", "agent-memoize-mcp"]
+      "args": ["-y", "@naevic/agent-memoize"]
     }
   }
 }
 ```
 
 **ZCode** — add via Settings → MCP Servers → New MCP Server (type `stdio`, command `npx`,
-args `-y agent-memoize-mcp`), or declare it in the workspace config `<project>/.zcode/config.json`:
+args `-y @naevic/agent-memoize`), or declare it in the workspace config `<project>/.zcode/config.json`:
 
 ```json
 {
@@ -100,7 +100,7 @@ args `-y agent-memoize-mcp`), or declare it in the workspace config `<project>/.
     "servers": {
       "agent-memoize": {
         "command": "npx",
-        "args": ["-y", "agent-memoize-mcp"]
+        "args": ["-y", "@naevic/agent-memoize"]
       }
     }
   }
@@ -119,13 +119,13 @@ scope):
   "mcpServers": {
     "agent-memoize": {
       "command": "npx",
-      "args": ["-y", "agent-memoize-mcp"]
+      "args": ["-y", "@naevic/agent-memoize"]
     }
   }
 }
 ```
 
-Or add it from the CLI: `kimi mcp add agent-memoize -- npx -y agent-memoize-mcp`.
+Or add it from the CLI: `kimi mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
 
 **Any MCP client**: launch `agent-memoize` over stdio. The project root is resolved from
 `--root <dir>`, then `$MEMOIZE_ROOT`, then the process working directory.

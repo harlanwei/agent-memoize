@@ -1,5 +1,5 @@
 {
-  "name": "agent-memoize-mcp",
+  "name": "@naevic/agent-memoize",
   "version": "0.1.0",
   "description": "Shared project-memory MCP server for AI coding agents (Claude Code, Codex, ...)",
   "license": "MIT",
