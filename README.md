@@ -70,8 +70,15 @@ args = ["-y", "agent-memoize-mcp"]
 
 Or add it from the CLI: `opencode2 mcp add agent-memoize -- npx -y agent-memoize-mcp`.
 
-**Pi** — `.mcp.json` in the project (or `~/.config/mcp/mcp.json` for user scope). Pi reads the
-standard `mcpServers` format, so Claude Code's project config works as-is:
+**Pi** — install the `pi-mcp-adapter` extension first, then restart Pi:
+
+```sh
+pi install npm:pi-mcp-adapter
+```
+
+Pi doesn't load MCP servers without it. Once installed, the adapter reads standard MCP files
+automatically, so Claude Code's project config works as-is — `.mcp.json` in the project (or
+`~/.config/mcp/mcp.json` for user scope):
 
 ```json
 {
