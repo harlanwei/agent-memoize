@@ -1,16 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  isValidName,
-  matchesAny,
-  parseEntry,
-  serializeEntry,
-  storePath,
-  walkTree,
-  withLock,
-} from "../src/store.js";
+import { parseEntry, plugin as filesDb, serializeEntry } from "../src/plugins/builtin/db-files.js";
+import { isValidName, matchesAny, storePath, walkTree } from "../src/workspace.js";
 import { tmpDir, write } from "./helpers.js";
+
+async function initDb(dir: string) {
+  await filesDb.init?.({ root: dir, options: {}, db: filesDb as never, log: () => {}, registerTool: () => {} });
+  return filesDb;
+}
 
 describe("entry front matter", () => {
   it("roundtrips a file entry", () => {
@@ -91,17 +89,64 @@ describe("matchesAny", () => {
   });
 });
 
-describe("withLock", () => {
+describe("files database plugin", () => {
+  it("writes, lists, reads and deletes entries", async () => {
+    const dir = await tmpDir();
+    const db = await initDb(dir);
+    const entry = {
+      name: "modules/auth",
+      kind: "file" as const,
+      sources: ["src/auth/**"],
+      author: "t",
+      updated: "2026-01-01T00:00:00.000Z",
+      summary: "auth",
+      content: "notes",
+    };
+    await db.writeEntry(entry);
+    expect((await db.listEntries()).entries).toHaveLength(1);
+    expect(await db.readEntry("modules/auth")).toMatchObject({ name: "modules/auth" });
+    expect(await db.deleteEntry("modules/auth")).toBe(true);
+    expect((await db.listEntries()).entries).toHaveLength(0);
+  });
+
+  it("reports unparseable entries as invalid", async () => {
+    const dir = await tmpDir();
+    const db = await initDb(dir);
+    await write(dir, ".agent-memoize/broken.md", "not front matter");
+    const r = await db.listEntries();
+    expect(r.entries).toHaveLength(0);
+    expect(r.invalid).toEqual(["broken"]);
+  });
+
   it("reclaims a stale lock and releases after use", async () => {
     const dir = await tmpDir();
+    const db = await initDb(dir);
     await fs.mkdir(storePath(dir), { recursive: true });
     const lock = path.join(storePath(dir), ".lock");
     await fs.mkdir(lock);
     const old = new Date(Date.now() - 60_000);
     await fs.utimes(lock, old, old);
-    await withLock(dir, async () => {
+    await db.withLock(async () => {
       /* critical section */
     });
     await expect(fs.stat(lock)).rejects.toThrow();
+  });
+
+  it("roundtrips manifest baselines including claims", async () => {
+    const dir = await tmpDir();
+    const db = await initDb(dir);
+    const m = {
+      version: 1 as const,
+      entries: {
+        a: {
+          git: null,
+          files: { "a.txt": { sha256: "x", mtimeMs: 1, size: 2, norm: "y" } },
+          hashMode: "normalized" as const,
+          claims: { "a.txt": [{ line: 1, hash: "h" }] },
+        },
+      },
+    };
+    await db.saveManifest(m);
+    expect(await db.loadManifest()).toEqual(m);
   });
 });

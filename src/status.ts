@@ -8,27 +8,45 @@ import {
   type CommitDiff,
 } from "./git.js";
 import {
-  fileChangedSince,
-  listEntries,
-  loadManifest,
+  claimLines,
+  claimsIntact,
+  classifyChange,
+  fingerprint,
+  findRename,
   matchesAny,
-  storeExists,
   walkTree,
-} from "./store.js";
-import type { EntryBaseline, StaleEntry, StatusResult } from "./types.js";
+} from "./workspace.js";
+import { getRegistry } from "./plugins/registry.js";
+import type { DatabasePlugin } from "./plugin.js";
+import type { ClaimRegion, Entry, EntryBaseline, FileFingerprint, StaleEntry, StalenessPolicy, StatusResult } from "./types.js";
 
 /** Output arrays are capped so a huge diff can't flood the agent's context. */
 const CAP = 50;
 
-function emptyResult(mode: "git" | "hash" | null): StatusResult {
+export interface StatusContext {
+  root: string;
+  db: DatabasePlugin;
+  staleness: StalenessPolicy;
+  ignoreComments: boolean;
+}
+
+interface ReBaselinePlan {
+  name: string;
+  sources: string[];
+}
+
+function emptyResult(mode: "git" | "hash" | null, invalid: string[] = []): StatusResult {
   return {
     state: "empty",
     mode,
     changedFiles: [],
     addedFiles: [],
     deletedFiles: [],
+    cosmeticChanges: [],
+    verifiedEntries: [],
+    suspendedEntries: [],
     staleEntries: [],
-    invalidEntries: [],
+    invalidEntries: invalid,
     truncated: false,
   };
 }
@@ -39,19 +57,34 @@ function symDiff(a: string[], b: string[]): string[] {
   return [...a.filter((p) => !sb.has(p)), ...b.filter((p) => !sa.has(p))];
 }
 
-/** Content-compare matched source files against the baseline (non-git path / fallback). */
-async function hashCompareAll(
-  root: string,
+/** Staleness policies other than "strict" use normalized fingerprints + claim regions. */
+function normalized(ctx: StatusContext): boolean {
+  return ctx.staleness !== "strict";
+}
+
+/**
+ * Content-compare matched source files against the baseline (non-git path /
+ * git fallback). Cosmetic changes are recorded globally but never stale.
+ */
+async function contentCompare(
+  ctx: StatusContext,
   matched: string[],
   base: EntryBaseline | null,
   changed: Set<string>,
   added: Set<string>,
   deleted: Set<string>,
+  cosmetic: Set<string>,
 ): Promise<void> {
   const baseFiles = base?.files ?? {};
   for (const p of matched) {
-    if (!(p in baseFiles)) added.add(p);
-    else if (await fileChangedSince(root, p, baseFiles[p])) changed.add(p);
+    if (!(p in baseFiles)) {
+      added.add(p);
+      continue;
+    }
+    const c = await classifyChange(ctx.root, p, baseFiles[p], ctx.ignoreComments);
+    if (c === "changed") changed.add(p);
+    else if (c === "deleted") deleted.add(p);
+    else if (c === "cosmetic") cosmetic.add(p);
   }
   const matchedSet = new Set(matched);
   for (const p of Object.keys(baseFiles)) {
@@ -59,24 +92,18 @@ async function hashCompareAll(
   }
 }
 
-export async function computeStatus(root: string): Promise<StatusResult> {
-  if (!(await storeExists(root))) return emptyResult(null);
+export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
+  const { root, db } = ctx;
+  const { entries, invalid } = await db.listEntries();
+  if (entries.length === 0) return emptyResult(null, invalid);
 
-  const { entries, invalid } = await listEntries(root);
   const repo = await isGitRepo(root);
   const mode = repo ? ("git" as const) : ("hash" as const);
-  if (entries.length === 0) {
-    const r = emptyResult(mode);
-    r.invalidEntries = invalid;
-    if (invalid.length > 0) r.state = "stale";
-    return r;
-  }
-
   const gitNow = repo ? { head: await gitHead(root), dirty: await dirtyList(root) } : null;
   const tree = repo
     ? [...new Set([...(await trackedFiles(root)), ...gitNow!.dirty])]
     : await walkTree(root);
-  const manifest = await loadManifest(root);
+  const manifest = await db.loadManifest();
 
   // name-status diffs are identical for entries sharing a baseline head — cache them.
   const diffCache = new Map<string, CommitDiff | null>();
@@ -93,7 +120,10 @@ export async function computeStatus(root: string): Promise<StatusResult> {
   const changed = new Set<string>();
   const added = new Set<string>();
   const deleted = new Set<string>();
+  const cosmetic = new Set<string>();
   const stale: StaleEntry[] = [];
+  const suspended: string[] = [];
+  const reBaseline = new Map<string, ReBaselinePlan>();
 
   for (const e of entries) {
     if (e.kind === "decision") continue; // only the user can contradict a decision
@@ -113,7 +143,7 @@ export async function computeStatus(root: string): Promise<StatusResult> {
           d.added.forEach((p) => ea.add(p));
           d.deleted.forEach((p) => ed.add(p));
         } else {
-          await hashCompareAll(root, matched, base, ec, ea, ed);
+          await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic);
         }
       }
       // Files that became dirty or clean since the baseline.
@@ -123,20 +153,122 @@ export async function computeStatus(root: string): Promise<StatusResult> {
       const dirtyNow = new Set(gitNow.dirty);
       for (const p of base.git.dirty) {
         if (dirtyNow.has(p) && matchesAny(e.sources, p)) {
-          if (await fileChangedSince(root, p, base.files[p])) ec.add(p);
+          const c = await classifyChange(root, p, base.files[p], ctx.ignoreComments);
+          if (c === "changed") ec.add(p);
+          else if (c === "deleted") ed.add(p);
         }
       }
     } else {
-      await hashCompareAll(root, matched, base, ec, ea, ed);
+      await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic);
     }
 
-    const hits = [...ec, ...ea, ...ed].filter((p) => matchesAny(e.sources, p));
-    if (hits.length > 0 || matched.length === 0) {
-      stale.push({ name: e.name, changedSources: hits.sort() });
-      for (const p of hits) {
+    // Claim-scoped triage per hit file.
+    const entryStaleSources: string[] = [];
+    let unrecoveredDelete = false;
+    let needsRebaseline = false;
+    const renames: { from: string; to: string }[] = [];
+
+    for (const p of hitsOf(ec, ea, ed, e.sources)) {
+      if (ea.has(p)) {
+        // A new file inside the sources: the entry's coverage changed —
+        // always worth agent attention, under every policy.
+        entryStaleSources.push(p);
+        continue;
+      }
+      if (ed.has(p)) {
+        if (e.sources.includes(p)) {
+          // Explicit-path source vanished: look for a rename (same content elsewhere).
+          const to = await findRename(root, p, base?.files[p], tree);
+          if (to) {
+            renames.push({ from: p, to });
+            needsRebaseline = true;
+            continue;
+          }
+        }
+        unrecoveredDelete = true;
+        entryStaleSources.push(p);
+        continue;
+      }
+      // Changed file: cosmetic → fresh; claim lines intact → re-baseline;
+      // claim line broken (or no claims) → stale.
+      if (base?.files[p]?.norm) {
+        const c = await classifyChange(root, p, base.files[p], ctx.ignoreComments);
+        if (c === "cosmetic") {
+          cosmetic.add(p);
+          continue;
+        }
+      }
+      const claims = base?.claims?.[p];
+      if (claims && claims.length > 0) {
+        if (await claimsIntact(root, p, claims)) {
+          needsRebaseline = true;
+          continue;
+        }
+        entryStaleSources.push(p);
+        continue;
+      }
+      // No claims for this file (old baseline or degenerate entry): whole-file rule.
+      entryStaleSources.push(p);
+    }
+
+    if (entryStaleSources.length > 0) {
+      for (const p of entryStaleSources) {
         if (ea.has(p)) added.add(p);
         else if (ed.has(p)) deleted.add(p);
         else changed.add(p);
+      }
+      const onlyUnrecoveredDeletes =
+        unrecoveredDelete && entryStaleSources.every((p) => ed.has(p));
+      if (onlyUnrecoveredDeletes) {
+        // Sources vanished with no rename and nothing else to re-read:
+        // the entry needs attention, not a stale re-read.
+        suspended.push(e.name);
+      } else {
+        stale.push({ name: e.name, changedSources: [...new Set(entryStaleSources)].sort() });
+      }
+      if (needsRebaseline) reBaseline.set(e.name, { name: e.name, sources: e.sources });
+    } else if (matched.length === 0 && renames.length === 0) {
+      suspended.push(e.name);
+    } else if (needsRebaseline) {
+      reBaseline.set(e.name, { name: e.name, sources: e.sources });
+    }
+    if (renames.length > 0) {
+      reBaseline.set(e.name, {
+        name: e.name,
+        sources: e.sources.map((s) => {
+          const r = renames.find((r) => r.from === s);
+          return r ? r.to : s;
+        }),
+      });
+    }
+  }
+
+  // Auto re-baseline (Layer 2/3): best-effort; on lock failure entries stay
+  // fresh-as-verified but are simply re-checked next run.
+  const staleNames = new Set(stale.map((s) => s.name));
+  const verified: string[] = [];
+  if (reBaseline.size > 0) {
+    try {
+      await db.withLock(async () => {
+        const m = await db.loadManifest();
+        const byName = new Map(entries.map((e) => [e.name, e]));
+        for (const plan of reBaseline.values()) {
+          const e = byName.get(plan.name);
+          if (!e) continue;
+          if (plan.sources.join("\u0000") !== e.sources.join("\u0000")) {
+            await db.writeEntry({ ...e, sources: plan.sources });
+          }
+          m.entries[plan.name] = await rebuildBaseline(ctx, e, plan.sources, tree, gitNow);
+        }
+        await db.saveManifest(m);
+      });
+      for (const name of reBaseline.keys()) {
+        if (!staleNames.has(name)) verified.push(name);
+      }
+    } catch {
+      // lock timeout or write failure — verified entries stay reported, not persisted
+      for (const name of reBaseline.keys()) {
+        if (!staleNames.has(name)) verified.push(name);
       }
     }
   }
@@ -144,13 +276,58 @@ export async function computeStatus(root: string): Promise<StatusResult> {
   const sortCap = (s: Set<string>) => [...s].sort().slice(0, CAP);
   const truncated = changed.size > CAP || added.size > CAP || deleted.size > CAP;
   return {
-    state: stale.length > 0 || invalid.length > 0 ? "stale" : "fresh",
+    state: stale.length > 0 || invalid.length > 0 || suspended.length > 0 ? "stale" : "fresh",
     mode,
     changedFiles: sortCap(changed),
     addedFiles: sortCap(added),
     deletedFiles: sortCap(deleted),
+    cosmeticChanges: sortCap(cosmetic),
+    verifiedEntries: verified,
+    suspendedEntries: suspended,
     staleEntries: stale,
     invalidEntries: invalid,
     truncated,
   };
+}
+
+function hitsOf(
+  ec: Set<string>,
+  ea: Set<string>,
+  ed: Set<string>,
+  sources: string[],
+): string[] {
+  return [...ec, ...ea, ...ed].filter((p) => matchesAny(sources, p));
+}
+
+/** Fresh baseline for a verified entry, mirroring update-time capture. */
+async function rebuildBaseline(
+  ctx: StatusContext,
+  e: Entry,
+  sources: string[],
+  tree: string[],
+  gitNow: { head: string | null; dirty: string[] } | null,
+): Promise<EntryBaseline> {
+  const norm = normalized(ctx) ? { ignoreComments: ctx.ignoreComments } : null;
+  const matched = tree.filter((p) => matchesAny(sources, p));
+  const files: Record<string, FileFingerprint> = {};
+  const claims: Record<string, ClaimRegion[]> = {};
+  for (const p of matched) {
+    const fp = await fingerprint(ctx.root, p, norm);
+    if (fp) {
+      files[p] = fp;
+      if (norm) claims[p] = await claimLines(ctx.root, p, e.content + "\n" + e.summary);
+    }
+  }
+  return {
+    git: gitNow,
+    files,
+    hashMode: norm ? "normalized" : "raw",
+    claims: norm ? claims : undefined,
+  };
+}
+
+/** Status entry point used by tools/tests: default registry for the root. */
+export async function computeStatusForRoot(root: string): Promise<StatusResult> {
+  const r = await getRegistry(root);
+  return computeStatus({ root, db: r.primaryDb, staleness: r.staleness, ignoreComments: r.ignoreComments });
 }

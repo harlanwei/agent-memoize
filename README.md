@@ -145,7 +145,8 @@ Codex, OpenCode, Pi, ZCode, and Kimi — or `CLAUDE.md` (Claude Code) so agents 
 ## Project memory (agent-memoize MCP)
 
 - At session start, call `memoize_status` once. If entries are stale, re-read only the listed
-  files — do not rescan the project.
+  files — do not rescan the project. `verified` entries are already fresh (auto re-baselined);
+  `suspended` entries need their sources fixed via `memoize_update`.
 - Before exploring the codebase, call `memoize_recall`. Recall a topic before reading the files
   it describes; if the memory is fresh and sufficient, skip reading them.
 - After editing files, call `memoize_update` for each affected entry (kind="file", with
@@ -159,8 +160,8 @@ Codex, OpenCode, Pi, ZCode, and Kimi — or `CLAUDE.md` (Claude Code) so agents 
 
 | Tool | Purpose |
 | --- | --- |
-| `memoize_status()` | Session-start check. Returns `{ state, mode, changedFiles, addedFiles, deletedFiles, staleEntries }`. `state`: `empty` / `fresh` / `stale`. |
-| `memoize_recall(topic?)` | No topic: index of entries (names, summaries, staleness — no content). With topic: entry content if fresh, else the changed source files to re-read. |
+| `memoize_status()` | Session-start check. Returns `{ state, mode, changedFiles, addedFiles, deletedFiles, cosmeticChanges, verifiedEntries, suspendedEntries, staleEntries }`. `state`: `empty` / `fresh` / `stale`. |
+| `memoize_recall(topic?)` | No topic: index of entries (names, summaries, per-entry `status`: `fresh` / `verified` / `stale` / `suspended` — no content). With topic: entry content if fresh or verified, else the changed source files to re-read (narrowed to the files that actually break the memory). |
 | `memoize_update(name, content, kind, sources?, summary?, author?)` | Create/refresh an entry and re-baseline its fingerprints. `kind="file"` requires `sources` (project-relative paths/globs). |
 | `memoize_invalidate(name?, confirm)` | Delete one entry, or the whole store when `name` is omitted. Requires `confirm=true` — the store is shared. |
 
@@ -194,20 +195,119 @@ Free-form markdown...
 
 ### How staleness is decided
 
-Each entry carries a baseline in `manifest.json`: the git state (HEAD + dirty files) and the
-content hashes of its matched sources at update time. `memoize_status` compares the baseline
-against the current workspace, per entry:
+Each entry carries a baseline in `manifest.json`: the git state (HEAD + dirty files), the
+content hashes of its matched sources, and — under the default policy — the **claim regions**:
+the lines of each source file that the entry text actually references (identifiers and paths
+extracted from the content). `memoize_status` compares the baseline against the current
+workspace, per entry:
 
 - **Git repos**: HEAD moved → `git diff` between the commits gives precise changed/added/deleted
   files. Dirty-set differences catch uncommitted edits. Files that were dirty at baseline *and*
-  now are re-verified by hash (git state alone can't see a second edit to the same dirty file).
+  now are re-verified by hash (git state alone cannot see a second edit to the same dirty file).
 - **Non-git**: content hashes of matched sources, with an mtime+size pre-check so unchanged
   files are never re-hashed.
 
-Only entries whose `sources` intersect the changed files go stale. Updating one entry never
-clears another entry's staleness. Writes are atomic and guarded by a short-lived lock, so
-multiple agents can share the store safely.
+Then the **staleness policy** decides what counts as stale:
 
+| Policy | Cosmetic edits (whitespace/comments) | Non-claim edits | Claim-line edits | New files in `sources` |
+| --- | --- | --- | --- | --- |
+| `strict` | stale | stale | stale | stale |
+| `claims` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale |
+| `cosmetic-only` | fresh | auto re-baselined | **stale** | stale |
+
+A **claim line** is a line of a source file that the entry text references; staleness is judged
+on claim lines only, and the check is position-independent (inserting or removing lines
+elsewhere in the file does not invalidate the memory). `changedSources` is narrowed to the
+files whose claim lines actually broke.
+
+Recovery is automatic where it is safe:
+
+- A changed file whose claim lines are intact is **auto re-baselined** — the memory stays fresh
+  and `memoize_status` lists it under `verifiedEntries` (which counts as fresh for recall).
+- A vanished explicit source with identical content elsewhere in the tree is treated as a
+  **rename**: the entry sources are updated automatically.
+- A vanished source with no rename (or sources that match nothing) leaves the entry
+  **suspended**: it needs agent attention, but is no longer stuck in perpetual staleness.
+- Cosmetic-only changes are reported in `cosmeticChanges` so nothing is hidden from the agent.
+
+Only entries whose `sources` intersect the changed files are touched. Updating one entry never
+clears staleness for another entry. Writes are atomic and guarded by a short-lived lock, so
+multiple agents can share the store safely. Config knob: `staleness` in
+`.agent-memoize/config.json` (or `MEMOIZE_STALENESS` env): `strict` | `claims` | `cosmetic-only`,
+default `claims`. `ignoreComments: true` additionally strips full-line comments per language
+when computing normalized hashes.
+## Plugins
+
+The server is a plugin pipeline: every capability is provided by an enabled plugin, so
+features compose non-exclusively and are ordered by a numeric `priority` (higher runs first).
+Built-in plugins ship with the package; third-party plugins load as npm packages.
+
+| Plugin type | What it does | Built-in (default) |
+| --- | --- | --- |
+| `datasource` | Produces and normalizes the raw input that becomes a memory; may also register extra MCP tools (e.g. a language-server source) | `agent` — validates `memoize_update` input, tags provenance, lints wide `sources` globs |
+| `database` | Persists entries and baselines. First enabled database is the primary read/write target; the rest are mirrors (writes fan out, failures warn) | `files` — `.agent-memoize/` markdown files + `manifest.json` |
+| `format` | Defines the memory representation and injects the agent instruction that produces it (into the `memoize_update` description). Highest-priority format is primary: its `render` shapes recall content; others annotate | `markdown` — free-form markdown + re-verification guidance |
+| `filter` | Retrieval strategy: gate, rank, drop, or annotate recall candidates. Filters chain in priority order | `core-filter` — the staleness gate anchor |
+
+### Config
+
+`.agent-memoize/config.json`:
+
+```json
+{
+  "version": 1,
+  "staleness": "claims",
+  "ignoreComments": false,
+  "plugins": [
+    { "id": "files", "priority": 100 },
+    { "id": "markdown", "priority": 100 },
+    { "id": "core-filter", "priority": 100 },
+    { "id": "agent", "priority": 100 },
+    { "id": "agent-memoize-db-sqlite", "priority": 200, "options": { "dbPath": ".memo.sqlite" } },
+    { "id": "agent-memoize-filter-semantic", "priority": 50, "options": { "model": "local" } }
+  ]
+}
+```
+
+When the config file is missing, or a type has no plugins, the defaults above are used — no
+config means exactly the previous behavior. Precedence: config file < `MEMOIZE_PLUGINS` env
+(JSON array) < `--plugins <json>` CLI arg.
+
+**Resolution**: built-in ids (`files`, `markdown`, `core-filter`, `agent`) resolve internally;
+anything else is `import()`ed — an npm package name resolved first against the server, then
+against the project (`node_modules`), or an absolute path to a local build for development.
+A plugin module exports `{ plugin }`, a default plugin object, or a default factory
+`(options) => plugin`. The plugin id and type are validated at startup; load or init failures
+abort the server with a clear message (fail fast).
+
+**Trust model**: plugins run with full user privileges, exactly like the MCP server itself.
+Only enable packages you trust. Plugin-registered tools are namespaced
+`memoize_<pluginId>_<name>` so they can never shadow the core tools.
+
+### Writing a plugin
+
+```ts
+import type { DatabasePlugin, PluginContext } from "@naevic/agent-memoize";
+
+export const plugin: DatabasePlugin = {
+  id: "my-db",
+  version: "1.0.0",
+  type: "database",
+  async init(ctx: PluginContext) {
+    // ctx.root, ctx.options, ctx.registerTool, ctx.log, ctx.db
+  },
+  async listEntries() { /* -> { entries, invalid } */ },
+  async readEntry(name) { /* -> Entry | null */ },
+  async writeEntry(entry) { /* ... */ },
+  async deleteEntry(name) { /* -> boolean */ },
+  async loadManifest() { /* -> Manifest */ },
+  async saveManifest(m) { /* ... */ },
+  async withLock(fn) { /* -> fn() */ },
+};
+```
+
+`Entry` and `Manifest` are the core data contract (`src/types.ts`): databases store them,
+formats shape `entry.content`, datasources produce them, filters rank them.
 ## Development
 
 ```sh

@@ -30,3 +30,9 @@ export async function write(root: string, rel: string, content: string): Promise
   await fs.mkdir(path.dirname(p), { recursive: true });
   await fs.writeFile(p, content);
 }
+
+/** Read the files-DB manifest directly (test convenience). */
+export async function loadManifest(root: string): Promise<{ version: 1; entries: Record<string, unknown> }> {
+  const p = path.join(root, ".agent-memoize", "manifest.json");
+  return JSON.parse(await fs.readFile(p, "utf8"));
+}

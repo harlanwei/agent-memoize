@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { updateEntry } from "../src/service.js";
-import { computeStatus } from "../src/status.js";
+import { computeStatusForRoot as computeStatus } from "../src/status.js";
 import { commitAll, gitRepo, tmpDir, write } from "./helpers.js";
 
 const authEntry = {

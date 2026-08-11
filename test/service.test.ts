@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { invalidate, recall, updateEntry } from "../src/service.js";
-import { loadManifest } from "../src/store.js";
+import { loadManifest } from "./helpers.js";
 import { tmpDir, write } from "./helpers.js";
 
 const decision = {

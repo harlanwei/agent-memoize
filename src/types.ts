@@ -1,5 +1,11 @@
 export type EntryKind = "file" | "decision";
 
+/** How aggressively file changes invalidate entries (config knob, default "claims"). */
+export type StalenessPolicy = "strict" | "claims" | "cosmetic-only";
+
+/** Per-entry freshness grade surfaced in status/recall. */
+export type EntryStatus = "fresh" | "verified" | "stale" | "suspended";
+
 export interface EntryMeta {
   /** Entry name, e.g. "modules/auth". Maps to `<name>.md` inside the store. */
   name: string;
@@ -24,6 +30,19 @@ export interface FileFingerprint {
   sha256: string;
   mtimeMs: number;
   size: number;
+  /** sha256 of the whitespace-normalized content, when hashMode is "normalized". */
+  norm?: string;
+}
+
+/**
+ * A line in a source file that the entry's text references. Staleness for
+ * "claims"/"cosmetic-only" policies is judged on these lines only.
+ */
+export interface ClaimRegion {
+  /** 1-based line number. */
+  line: number;
+  /** sha256 of the line with trailing whitespace stripped. */
+  hash: string;
 }
 
 /**
@@ -36,6 +55,10 @@ export interface EntryBaseline {
   git: { head: string | null; dirty: string[] } | null;
   /** Fingerprints of files matched by the entry's sources at update time. */
   files: Record<string, FileFingerprint>;
+  /** "normalized" when the staleness policy captured normalized hashes. */
+  hashMode?: "raw" | "normalized";
+  /** Claim regions per source file, when the entry was captured under a non-strict policy. */
+  claims?: Record<string, ClaimRegion[]>;
 }
 
 export interface Manifest {
@@ -55,6 +78,12 @@ export interface StatusResult {
   changedFiles: string[];
   addedFiles: string[];
   deletedFiles: string[];
+  /** Files that changed but only cosmetically (whitespace/comments) — entries stay fresh. */
+  cosmeticChanges: string[];
+  /** Entries auto re-baselined this run: their claim lines were intact. */
+  verifiedEntries: string[];
+  /** Entries whose sources are gone/unmatched and no rename was found. */
+  suspendedEntries: string[];
   staleEntries: StaleEntry[];
   /** Entry files that failed to parse. */
   invalidEntries: string[];
