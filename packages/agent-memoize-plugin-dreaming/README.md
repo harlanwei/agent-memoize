@@ -20,11 +20,11 @@ npm install -D @naevic/agent-memoize-plugin-dreaming
 {
   "version": 1,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
-    { "id": "dreaming", "priority": 100, "options": { "threshold": 15 } }
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
+    { "id": "dreaming", "options": { "threshold": 15 } }
   ]
 }
 ```

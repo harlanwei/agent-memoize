@@ -18,11 +18,11 @@ npm install -D @naevic/agent-memoize-plugin-dashboard
 {
   "version": 1,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
-    { "id": "dashboard", "priority": 100, "options": { "port": 8888 } }
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
+    { "id": "dashboard", "options": { "port": 8888 } }
   ]
 }
 ```

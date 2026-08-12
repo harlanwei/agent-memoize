@@ -43,10 +43,10 @@ async function writeConfig(root: string, plugins: unknown[], staleness = "strict
 }
 
 const defaultPlugins = [
-  { id: "files", priority: 100 },
-  { id: "markdown", priority: 100 },
-  { id: "core-filter", priority: 100 },
-  { id: "agent", priority: 100 },
+  { id: "files" },
+  { id: "markdown" },
+  { id: "core-filter" },
+  { id: "agent" },
 ];
 
 function ctxFor(registry: Registry, root: string): ServiceContext {
@@ -59,7 +59,7 @@ async function makeRegistry(
   opts?: { staleness?: string; plugins?: unknown[] },
 ): Promise<Registry> {
   const cfg =
-    opts?.plugins ?? [...defaultPlugins, ...extras.map((p) => ({ id: p.id, priority: p.priority ?? 100 }))];
+    opts?.plugins ?? [...defaultPlugins, ...extras.map((p) => ({ id: p.id }))];
   await writeConfig(root, cfg as unknown[], opts?.staleness ?? "strict");
   return Registry.create({ root, load: loaderFor(extras) });
 }
@@ -70,11 +70,11 @@ afterEach(async () => {
 });
 
 describe("postprocessing plugin type", () => {
-  it("runs in priority order and annotates the status result", async () => {
+  it("runs in config order and annotates the status result", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
     const order: string[] = [];
-    const mk = (id: string, priority: number, tag: string) => ({
+    const mk = (id: string, tag: string) => ({
       id,
       version: "1",
       type: "postprocessing",
@@ -85,12 +85,12 @@ describe("postprocessing plugin type", () => {
     });
     await writeConfig(dir, [
       ...defaultPlugins,
-      { id: "pp-low", priority: 50 },
-      { id: "pp-high", priority: 200 },
+      { id: "pp-high" },
+      { id: "pp-low" },
     ]);
     const r = await Registry.create({
       root: dir,
-      load: loaderFor([mk("pp-low", 50, "low"), mk("pp-high", 200, "high")]),
+      load: loaderFor([mk("pp-high", "high"), mk("pp-low", "low")]),
     });
     expect(r.postprocessors.map((p) => p.id)).toEqual(["pp-high", "pp-low"]);
     await updateEntryCtx(ctxFor(r, dir), {
@@ -234,7 +234,7 @@ describe("dreaming plugin", () => {
     const r = await makeRegistry(dir, [dreaming], {
       plugins: [
         ...defaultPlugins,
-        { id: "dreaming", priority: 100, options: { threshold: 2 } },
+        { id: "dreaming", options: { threshold: 2 } },
       ],
     });
     for (const n of ["m1", "m2"]) {
@@ -263,7 +263,7 @@ describe("dreaming plugin", () => {
     const r = await makeRegistry(dir, [dreaming], {
       plugins: [
         ...defaultPlugins,
-        { id: "dreaming", priority: 100, options: { threshold: 1 } },
+        { id: "dreaming", options: { threshold: 1 } },
       ],
     });
     const ctx = ctxFor(r, dir);
@@ -382,7 +382,7 @@ describe("dashboard plugin", () => {
     const r = await makeRegistry(dir, [dashboard], {
       plugins: [
         ...defaultPlugins,
-        { id: "dashboard", priority: 100, options: { port: 0, maxLogs: 10 } },
+        { id: "dashboard", options: { port: 0, maxLogs: 10 } },
       ],
     });
     const ctx = ctxFor(r, dir);
@@ -438,7 +438,7 @@ describe("dashboard plugin", () => {
     const r = await makeRegistry(dir, [dashboard], {
       plugins: [
         ...defaultPlugins,
-        { id: "dashboard", priority: 100, options: { port: 0 } },
+        { id: "dashboard", options: { port: 0 } },
       ],
     });
     const base = dashboardUrl();
@@ -468,7 +468,7 @@ describe("dashboard plugin", () => {
     const r = await makeRegistry(dir, [dashboard], {
       plugins: [
         ...defaultPlugins,
-        { id: "dashboard", priority: 100, options: { port: 0 } },
+        { id: "dashboard", options: { port: 0 } },
       ],
     });
     const base = dashboardUrl();
@@ -498,7 +498,7 @@ describe("dashboard plugin", () => {
     await write(dir, "a.txt", "hello\n");
     const mkConfig = (port: number) => [
       ...defaultPlugins,
-      { id: "dashboard", priority: 100, options: { port } },
+      { id: "dashboard", options: { port } },
     ];
     const rA = await makeRegistry(dir, [dashboard], { plugins: mkConfig(0) });
     const baseA = dashboardUrl();

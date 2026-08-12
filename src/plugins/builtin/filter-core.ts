@@ -3,9 +3,9 @@ import type { FilterPlugin } from "../../plugin.js";
 /**
  * The default recall gate: identity chain element. Staleness gating lives in
  * the recall assembly (stale content is never served); this plugin is the
- * anchor of the filter chain and the documented slot for higher/lower
- * priority filters to compose around (e.g. rerankers at priority 50, LLM
- * verifiers that flip status from stale to verified at priority 200).
+ * anchor of the filter chain and the documented slot for other filters in
+ * the config array to compose around (e.g. a reranker listed before it, or
+ * an LLM verifier that flips status from stale to verified listed after it).
  */
 export const plugin: FilterPlugin = {
   id: "core-filter",

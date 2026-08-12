@@ -20,7 +20,7 @@ Options:
   --root <dir>       Project root containing (or to contain) .agent-memoize/
                      Default: MEMOIZE_ROOT env var, else the current directory.
   --plugins <json>   Override .agent-memoize/config.json plugins, e.g.
-                     [{ "id": "files", "priority": 100 }, ...]
+                     [{ "id": "files" }, ...]
   -h, --help         Show this help.
   -v, --version      Show version.
 

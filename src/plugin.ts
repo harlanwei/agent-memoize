@@ -11,7 +11,6 @@ export type PluginType =
 
 export interface PluginConfig {
   id: string;
-  priority: number;
   options?: Record<string, unknown>;
 }
 
@@ -94,7 +93,7 @@ export interface FormatPlugin extends BasePlugin {
 /** Retrieval strategy: gate, rank, drop, or annotate recall candidates. */
 export interface FilterPlugin extends BasePlugin {
   type: "filter";
-  /** Chain: output of one filter is the input of the next, in priority order. */
+  /** Chain: output of one filter is the input of the next, in config order. */
   filter(query: RecallQuery, candidates: RecallCandidate[]): Promise<RecallCandidate[]>;
 }
 
@@ -104,7 +103,7 @@ export type PostprocessOperation = "status" | "recall" | "update" | "invalidate"
 /**
  * Post-processing: runs on an operation's result right before it is returned
  * to the agent, so it can give the agent extra guidance (e.g. whether to
- * update/consolidate memories). Plugins chain in priority order; each receives
+ * update/consolidate memories). Plugins chain in config order; each receives
  * the output of the previous one.
  */
 export interface PostprocessPlugin extends BasePlugin {

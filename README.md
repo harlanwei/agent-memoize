@@ -216,16 +216,16 @@ when computing normalized hashes.
 ## Plugins
 
 The server is a plugin pipeline: every capability is provided by an enabled plugin, so
-features compose non-exclusively and are ordered by a numeric `priority` (higher runs first).
-Built-in plugins ship with the package; third-party plugins load as npm packages.
+features compose non-exclusively and run in the order they are listed in the `plugins` array
+(earlier runs first). Built-in plugins ship with the package; third-party plugins load as npm packages.
 
 | Plugin type | What it does | Built-in (default) |
 | --- | --- | --- |
 | `datasource` | Produces and normalizes the raw input that becomes a memory; may also register extra MCP tools (e.g. a language-server source) | `agent` — validates `memoize_update` input, tags provenance, lints wide `sources` globs |
 | `database` | Persists entries and baselines. First enabled database is the primary read/write target; the rest are mirrors (writes fan out, failures warn) | `files` — `.agent-memoize/` markdown files + `manifest.json` |
-| `format` | Defines the memory representation and injects the agent instruction that produces it (into the `memoize_update` description). Highest-priority format is primary: its `render` shapes recall content; others annotate | `markdown` — free-form markdown + re-verification guidance |
-| `filter` | Retrieval strategy: gate, rank, drop, or annotate recall candidates. Filters chain in priority order | `core-filter` — the staleness gate anchor |
-| `postprocessing` | Runs on an operation's result (`status` / `recall` / `update` / `invalidate`) right before it is returned to the agent, so it can give the agent extra guidance — e.g. whether to update memories. Plugins chain in priority order; each sees the previous one's output | — (opt-in) |
+| `format` | Defines the memory representation and injects the agent instruction that produces it (into the `memoize_update` description). First format in the config is primary: its `render` shapes recall content; others annotate | `markdown` — free-form markdown + re-verification guidance |
+| `filter` | Retrieval strategy: gate, rank, drop, or annotate recall candidates. Filters chain in config order | `core-filter` — the staleness gate anchor |
+| `postprocessing` | Runs on an operation's result (`status` / `recall` / `update` / `invalidate`) right before it is returned to the agent, so it can give the agent extra guidance — e.g. whether to update memories. Plugins chain in config order; each sees the previous one's output | — (opt-in) |
 | `debugging` | Observability: `onMemoryCreated` fires when a memory is created/refreshed, `onMemoryAccessed` when an agent recalls memories. Hooks are best-effort — failures are logged, never fatal | — (opt-in) |
 
 ### Config
@@ -238,12 +238,12 @@ Built-in plugins ship with the package; third-party plugins load as npm packages
   "staleness": "claims",
   "ignoreComments": false,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
-    { "id": "agent-memoize-db-sqlite", "priority": 200, "options": { "dbPath": ".memo.sqlite" } },
-    { "id": "agent-memoize-filter-semantic", "priority": 50, "options": { "model": "local" } }
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
+    { "id": "agent-memoize-db-sqlite", "options": { "dbPath": ".memo.sqlite" } },
+    { "id": "agent-memoize-filter-semantic", "options": { "model": "local" } }
   ]
 }
 ```
@@ -274,13 +274,12 @@ npm run build          # in memoize-skill, this builds the core and both plugin 
 {
   "version": 1,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
     {
       "id": "/home/you/dev/memoize-skill/packages/agent-memoize-plugin-dreaming/dist/index.js",
-      "priority": 100,
       "options": { "threshold": 15 }
     }
   ]
@@ -313,11 +312,11 @@ npm install -D @naevic/agent-memoize-plugin-dreaming   # in the project (or the 
 {
   "version": 1,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
-    { "id": "dreaming", "priority": 100, "options": { "threshold": 15 } }
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
+    { "id": "dreaming", "options": { "threshold": 15 } }
   ]
 }
 ```
@@ -335,11 +334,11 @@ npm install -D @naevic/agent-memoize-plugin-dashboard
 {
   "version": 1,
   "plugins": [
-    { "id": "files", "priority": 100 },
-    { "id": "markdown", "priority": 100 },
-    { "id": "core-filter", "priority": 100 },
-    { "id": "agent", "priority": 100 },
-    { "id": "dashboard", "priority": 100, "options": { "port": 8888 } }
+    { "id": "files" },
+    { "id": "markdown" },
+    { "id": "core-filter" },
+    { "id": "agent" },
+    { "id": "dashboard", "options": { "port": 8888 } }
   ]
 }
 ```

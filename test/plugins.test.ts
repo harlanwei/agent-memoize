@@ -91,7 +91,7 @@ describe("registry config", () => {
 
   it("reads the config file from the store dir", async () => {
     const dir = await tmpDir();
-    await writeConfig(dir, [{ id: "files", priority: 100 }]);
+    await writeConfig(dir, [{ id: "files" }]);
     const r = await Registry.create({ root: dir });
     expect(r.databases.map((d) => d.id)).toEqual(["files"]);
     expect(r.formats.map((f) => f.id)).toEqual(["markdown"]);
@@ -101,8 +101,8 @@ describe("registry config", () => {
 
   it("MEMOIZE_PLUGINS env overrides the config file", async () => {
     const dir = await tmpDir();
-    await writeConfig(dir, [{ id: "files", priority: 100 }]);
-    process.env.MEMOIZE_PLUGINS = JSON.stringify([{ id: "agent", priority: 100 }]);
+    await writeConfig(dir, [{ id: "files" }]);
+    process.env.MEMOIZE_PLUGINS = JSON.stringify([{ id: "agent" }]);
     const r = await Registry.create({
       root: dir,
       load: loaderFor([{ id: "agent", version: "1", type: "datasource" }]),
@@ -113,11 +113,11 @@ describe("registry config", () => {
 
   it("--plugins CLI override wins over env and config", async () => {
     const dir = await tmpDir();
-    await writeConfig(dir, [{ id: "files", priority: 100 }]);
-    process.env.MEMOIZE_PLUGINS = JSON.stringify([{ id: "agent", priority: 100 }]);
+    await writeConfig(dir, [{ id: "files" }]);
+    process.env.MEMOIZE_PLUGINS = JSON.stringify([{ id: "agent" }]);
     const r = await Registry.create({
       root: dir,
-      cliPlugins: JSON.stringify([{ id: "core-filter", priority: 100 }]),
+      cliPlugins: JSON.stringify([{ id: "core-filter" }]),
       load: loaderFor([{ id: "core-filter", version: "1", type: "filter" }]),
     });
     expect(r.filters.map((f) => f.id)).toEqual(["core-filter"]);
@@ -138,26 +138,24 @@ describe("registry config", () => {
     await expect(Registry.create({ root: dir })).rejects.toThrow(/config\.json/);
   });
 
-  it("rejects duplicate ids and bad priorities", async () => {
+  it("rejects duplicate ids", async () => {
     const dir = await tmpDir();
     await writeConfig(dir, [
-      { id: "files", priority: 100 },
-      { id: "files", priority: 50 },
+      { id: "files" },
+      { id: "files" },
     ]);
     await expect(Registry.create({ root: dir })).rejects.toThrow(/duplicate/);
-    await writeConfig(dir, [{ id: "files", priority: "high" }]);
-    await expect(Registry.create({ root: dir })).rejects.toThrow(/priority/);
   });
 
   it("rejects an unresolvable plugin id (fail fast)", async () => {
     const dir = await tmpDir();
-    await writeConfig(dir, [{ id: "no-such-plugin-xyz", priority: 100 }]);
+    await writeConfig(dir, [{ id: "no-such-plugin-xyz" }]);
     await expect(Registry.create({ root: dir })).rejects.toThrow(/cannot resolve plugin/);
   });
 
   it("rejects a plugin whose declared id does not match the config", async () => {
     const dir = await tmpDir();
-    await writeConfig(dir, [{ id: "a", priority: 100 }]);
+    await writeConfig(dir, [{ id: "a" }]);
     await expect(
       Registry.create({
         root: dir,
@@ -167,31 +165,31 @@ describe("registry config", () => {
   });
 });
 
-describe("priority and lifecycle", () => {
-  it("runs higher-priority plugins first within a type", async () => {
+describe("ordering and lifecycle", () => {
+  it("runs plugins in config-array order within a type (defaults appended after)", async () => {
     const dir = await tmpDir();
-    const order: string[] = [];
-    const mk = (id: string, priority: number) => ({
+    const mk = (id: string) => ({
       id,
       version: "1",
       type: "filter",
       async filter() {
-        order.push(id);
         return arguments[1];
       },
     });
     await writeConfig(dir, [
-      { id: "f-low", priority: 50 },
-      { id: "f-high", priority: 200 },
+      { id: "f-first" },
+      { id: "f-second" },
     ]);
-    const r = await Registry.create({ root: dir, load: loaderFor([mk("f-low", 50), mk("f-high", 200)]) });
-    expect(r.filters.map((f) => f.id)).toEqual(["f-high", "core-filter", "f-low"]);
+    const r = await Registry.create({ root: dir, load: loaderFor([mk("f-first"), mk("f-second")]) });
+    // Config order is preserved; defaults fill in for any type missing from
+    // the config, so core-filter (the default filter) is appended after.
+    expect(r.filters.map((f) => f.id)).toEqual(["f-first", "f-second", "core-filter"]);
   });
 
   it("initializes databases first, then sources, formats, filters; shutdown is reverse", async () => {
     const dir = await tmpDir();
     const order: string[] = [];
-    const mk = (id: string, type: string, priority: number): any => ({
+    const mk = (id: string, type: string): any => ({
       id,
       version: "1",
       type,
@@ -206,18 +204,18 @@ describe("priority and lifecycle", () => {
       },
     });
     await writeConfig(dir, [
-      { id: "db", priority: 100 },
-      { id: "ds", priority: 100 },
-      { id: "fmt", priority: 100 },
-      { id: "flt", priority: 100 },
+      { id: "db" },
+      { id: "ds" },
+      { id: "fmt" },
+      { id: "flt" },
     ]);
     const r = await Registry.create({
       root: dir,
       load: loaderFor([
-        mk("db", "database", 100),
-        mk("ds", "datasource", 100),
-        mk("fmt", "format", 100),
-        mk("flt", "filter", 100),
+        mk("db", "database"),
+        mk("ds", "datasource"),
+        mk("fmt", "format"),
+        mk("flt", "filter"),
       ]),
     });
     expect(order).toEqual(["init:db", "init:ds", "init:fmt", "init:flt"]);
@@ -248,7 +246,7 @@ describe("priority and lifecycle", () => {
         return arguments[1];
       },
     };
-    await writeConfig(dir, [{ id: "stats", priority: 100 }]);
+    await writeConfig(dir, [{ id: "stats" }]);
     const r = await Registry.create({ root: dir, load: loaderFor([withTool]) });
     expect(r.tools).toHaveLength(1);
     expect(r.tools[0].name).toBe("memoize_stats_snapshot");
@@ -269,7 +267,7 @@ describe("priority and lifecycle", () => {
         return arguments[1];
       },
     };
-    await writeConfig(dir, [{ id: "p1", priority: 100 }]);
+    await writeConfig(dir, [{ id: "p1" }]);
     await expect(
       Registry.create({ root: dir, load: loaderFor([dup]) }),
     ).rejects.toThrow(/collision/);
@@ -296,7 +294,7 @@ describe("datasource, format and filter plugins", () => {
         return null;
       },
     };
-    await writeConfig(dir, [{ id: "shouter", priority: 100 }]);
+    await writeConfig(dir, [{ id: "shouter" }]);
     const r = await Registry.create({ root: dir, load: loaderFor([ds]) });
     const res = await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
@@ -309,7 +307,7 @@ describe("datasource, format and filter plugins", () => {
     const stored = await r.primaryDb.readEntry("m");
     expect(stored!.content).toBe("NOTES HERE\n");
 
-    await writeConfig(dir, [{ id: "rejecter", priority: 100 }]);
+    await writeConfig(dir, [{ id: "rejecter" }]);
     const r2 = await Registry.create({ root: dir, load: loaderFor([reject]) });
     await expect(
       updateEntryCtx(ctxFor(r2, dir), {
@@ -342,8 +340,8 @@ describe("datasource, format and filter plugins", () => {
       },
     };
     await writeConfig(dir, [
-      { id: "fmt-b", priority: 100 },
-      { id: "fmt-a", priority: 200 },
+      { id: "fmt-a" },
+      { id: "fmt-b" },
     ]);
     const r = await Registry.create({ root: dir, load: loaderFor([primary, secondary]) });
     await updateEntryCtx(ctxFor(r, dir), {
@@ -357,7 +355,7 @@ describe("datasource, format and filter plugins", () => {
     expect(rec.format).toEqual({ "fmt-b": { wordCount: 3 } });
   });
 
-  it("filters run in priority order and can drop and annotate candidates", async () => {
+  it("filters run in config order and can drop and annotate candidates", async () => {
     const dir = await tmpDir();
     const order: string[] = [];
     const drop = {
@@ -382,8 +380,8 @@ describe("datasource, format and filter plugins", () => {
       },
     };
     await writeConfig(dir, [
-      { id: "dropper", priority: 100 },
-      { id: "ranker", priority: 300 },
+      { id: "ranker" },
+      { id: "dropper" },
     ]);
     const r = await Registry.create({ root: dir, load: loaderFor([drop, annotate]) });
     await updateEntryCtx(ctxFor(r, dir), { name: "keep-me-out", kind: "decision", content: "x", author: "t" });
@@ -422,9 +420,9 @@ describe("datasource, format and filter plugins", () => {
       },
     };
     await writeConfig(dir, [
-      { id: "agent-memoize-memory-db", priority: 200 },
-      { id: "files", priority: 100 },
-      { id: "broken-mirror", priority: 50 },
+      { id: "agent-memoize-memory-db" },
+      { id: "files" },
+      { id: "broken-mirror" },
     ]);
     const r = await Registry.create({
       root: dir,
@@ -472,7 +470,7 @@ describe("dynamic import of external plugins", () => {
     await fs.mkdir(pkg, { recursive: true });
     await fs.writeFile(path.join(pkg, "package.json"), "{\"type\":\"module\"}\n");
     await fs.writeFile(path.join(pkg, "index.js"), memoryDbSource);
-    await writeConfig(dir, [{ id: "agent-memoize-memory-db", priority: 200 }]);
+    await writeConfig(dir, [{ id: "agent-memoize-memory-db" }]);
     const r = await Registry.create({ root: dir });
     expect(r.primaryDb.id).toBe("agent-memoize-memory-db");
     const res = await updateEntryCtx(ctxFor(r, dir), {
@@ -491,7 +489,7 @@ describe("dynamic import of external plugins", () => {
     const dir = await tmpDir();
     const mod = path.join(dir, "memory-db.mjs");
     await fs.writeFile(mod, memoryDbSource);
-    await writeConfig(dir, [{ id: mod, priority: 100 }]);
+    await writeConfig(dir, [{ id: mod }]);
     const r = await Registry.create({ root: dir });
     expect(r.primaryDb.id).toBe("agent-memoize-memory-db");
   });
@@ -504,7 +502,7 @@ describe("dynamic import of external plugins", () => {
       mod,
       "export const plugin = { id: \"opt-plugin\", version: \"1\", type: \"filter\", async init(ctx) { seen = ctx.options; }, async filter(_q, c) { return c; } };",
     );
-    await writeConfig(dir, [{ id: mod, priority: 100, options: { threshold: 7 } }]);
+    await writeConfig(dir, [{ id: mod, options: { threshold: 7 } }]);
     const r = await Registry.create({ root: dir, load: async (id) => {
       if (builtinById[id]) return builtinById[id];
       const m = (await import(id)) as { plugin: any };

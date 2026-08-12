@@ -43,10 +43,10 @@ const BUILTIN_MODULES: Record<string, () => Promise<{ plugin: BasePlugin }>> = {
 };
 
 const DEFAULT_PLUGINS: PluginConfig[] = [
-  { id: "files", priority: 100 },
-  { id: "markdown", priority: 100 },
-  { id: "core-filter", priority: 100 },
-  { id: "agent", priority: 100 },
+  { id: "files" },
+  { id: "markdown" },
+  { id: "core-filter" },
+  { id: "agent" },
 ];
 
 const RESERVED_TOOLS = new Set([
@@ -81,7 +81,7 @@ export class Registry {
   tools: ToolRegistration[] = [];
   primaryDb!: DatabasePlugin;
 
-  /** Plugins in init order (databases first, priority desc within each type). */
+  /** Plugins in init order (databases first, config order within each type). */
   private readonly initOrder: BasePlugin[] = [];
 
   private constructor(root: string, staleness: StalenessPolicy, ignoreComments: boolean) {
@@ -104,41 +104,39 @@ export class Registry {
 
     // Load every configured plugin (type comes from the plugin itself),
     // then fill missing types with the defaults so behavior never degrades.
+    // Map iteration order is insertion order, so byType preserves config
+    // array position (configured plugins first, defaults appended after):
+    // within each category, if A is listed before B, A runs first.
     const loaded = new Map<string, BasePlugin>();
-    const priority = new Map<string, number>();
     const cfgByPlugin = new Map<BasePlugin, PluginConfig>();
     for (const cfg of plugins) {
       const p = await loadOne(cfg.id, cfg.options ?? {}, loader);
       loaded.set(cfg.id, p);
-      priority.set(cfg.id, cfg.priority);
       cfgByPlugin.set(p, cfg);
     }
     for (const def of DEFAULT_PLUGINS) {
       if (loaded.has(def.id)) continue;
       const p = await loadOne(def.id, def.options ?? {}, loader);
       loaded.set(def.id, p);
-      priority.set(def.id, def.priority);
       cfgByPlugin.set(p, def);
     }
     const byType = new Map<PluginType, BasePlugin[]>();
     for (const type of TYPES) byType.set(type, []);
     for (const p of loaded.values()) byType.get(p.type)?.push(p);
     for (const type of TYPES) {
-      const sorted = byType
-        .get(type)!
-        .sort((a, b) => priority.get(b.id)! - priority.get(a.id)!);
+      const ordered = byType.get(type)!;
       if (type === "database") {
-        registry.databases = sorted as DatabasePlugin[];
+        registry.databases = ordered as DatabasePlugin[];
         if (registry.databases.length === 0) {
           throw new Error("no database plugin enabled (default: files)");
         }
         registry.primaryDb = registry.databases[0];
-      } else if (type === "datasource") registry.datasources = sorted as DataSourcePlugin[];
-      else if (type === "format") registry.formats = sorted as FormatPlugin[];
-      else if (type === "filter") registry.filters = sorted as FilterPlugin[];
+      } else if (type === "datasource") registry.datasources = ordered as DataSourcePlugin[];
+      else if (type === "format") registry.formats = ordered as FormatPlugin[];
+      else if (type === "filter") registry.filters = ordered as FilterPlugin[];
       else if (type === "postprocessing")
-        registry.postprocessors = sorted as PostprocessPlugin[];
-      else registry.debuggers = sorted as DebuggingPlugin[];
+        registry.postprocessors = ordered as PostprocessPlugin[];
+      else registry.debuggers = ordered as DebuggingPlugin[];
     }
 
     // Databases init first so ctx.db is set before other plugins run.
@@ -239,7 +237,7 @@ function parsePluginList(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error("--plugins/MEMOIZE_PLUGINS must be a JSON array of { id, priority, options? }");
+    throw new Error("--plugins/MEMOIZE_PLUGINS must be a JSON array of { id, options? }");
   }
   if (!Array.isArray(parsed)) throw new Error("--plugins/MEMOIZE_PLUGINS must be a JSON array");
   return parsed as PluginConfig[];
@@ -263,9 +261,6 @@ function validatePluginList(plugins: PluginConfig[]): void {
       cfg.id === ""
     ) {
       throw new Error(`invalid plugin entry: ${JSON.stringify(cfg)}`);
-    }
-    if (typeof cfg.priority !== "number" || !Number.isFinite(cfg.priority)) {
-      throw new Error(`plugin "${cfg.id}": priority must be a finite number`);
     }
     if (seen.has(cfg.id)) throw new Error(`duplicate plugin id: "${cfg.id}"`);
     seen.add(cfg.id);
