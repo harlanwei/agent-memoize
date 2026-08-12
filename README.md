@@ -1,6 +1,10 @@
-# agent-memoize
+# @naevic/agent-memoize
 
-Shared project-memory MCP server for AI coding agents (Claude Code, Codex, and any MCP client).
+`@naevic/agent-memoize` is a shared project-memory MCP server for AI coding agents.
+
+![Example of `agent-memoize` coming in handy](docs/static/introduction.png)
+
+## Why
 
 Agents waste context re-analyzing the same project every session. `agent-memoize` gives them a
 small, durable memory store at `<project>/.agent-memoize/`: while an agent reads your code it
@@ -25,11 +29,13 @@ compact — the store costs almost no context when unused.
 
 ## Install
 
+### Step 1: install it on your computer
+
 ```sh
-npm install -g @naevic/agent-memoize        # or run it via npx (no install)
+npm install -g @naevic/agent-memoize
 ```
 
-## Configure your agent
+### Step 2: set up your coding agent as an MCP client
 
 **Claude Code** — `.mcp.json` in the project (or `~/.claude.json` for user scope):
 
@@ -68,9 +74,9 @@ args = ["-y", "@naevic/agent-memoize"]
 }
 ```
 
-Or add it from the CLI: `opencode2 mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
+Or add it from the CLI: `opencode mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
 
-**Pi** — install the `pi-mcp-adapter` extension first, then restart Pi:
+**Pi coding agent** — install the `pi-mcp-adapter` extension first, then restart Pi:
 
 ```sh
 pi install npm:pi-mcp-adapter
@@ -91,8 +97,25 @@ automatically, so Claude Code's project config works as-is — `.mcp.json` in th
 }
 ```
 
-**ZCode** — add via Settings → MCP Servers → New MCP Server (type `stdio`, command `npx`,
-args `-y @naevic/agent-memoize`), or declare it in the workspace config `<project>/.zcode/config.json`:
+**DeepSeek Harness** — (TBA)
+
+**Kimi Code** — `~/.kimi-code/mcp.json` (user scope) or `<project>/.kimi-code/mcp.json` (project
+scope):
+
+```json
+{
+  "mcpServers": {
+    "agent-memoize": {
+      "command": "npx",
+      "args": ["-y", "@naevic/agent-memoize"]
+    }
+  }
+}
+```
+
+Or add it from the CLI: `kimi mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
+
+**ZCode** — declare it in the workspace config `<project>/.zcode/config.json`:
 
 ```json
 {
@@ -111,35 +134,16 @@ ZCode also accepts the standard `mcpServers` structure in `<project>/.agents/mcp
 import existing servers from Claude Code, Codex, or OpenCode configs via the Import button on
 the MCP Servers page.
 
-**Kimi** — `~/.kimi-code/mcp.json` (user scope) or `<project>/.kimi-code/mcp.json` (project
-scope):
-
-```json
-{
-  "mcpServers": {
-    "agent-memoize": {
-      "command": "npx",
-      "args": ["-y", "@naevic/agent-memoize"]
-    }
-  }
-}
-```
-
-Or add it from the CLI: `kimi mcp add agent-memoize -- npx -y @naevic/agent-memoize`.
-
-**Any MCP client**: launch `agent-memoize` over stdio. The project root is resolved from
-`--root <dir>`, then `$MEMOIZE_ROOT`, then the process working directory.
-
 **Running from a local checkout** (development):
 
 ```json
 { "mcpServers": { "agent-memoize": { "command": "node", "args": ["/path/to/memoize-skill/dist/index.js"] } } }
 ```
 
-## Tell the agent how to use it
+### Step 3: inform your coding agent about the workflow
 
-MCP tools don't invoke themselves. Add this block to your project's `AGENTS.md` — read by
-Codex, OpenCode, Pi, ZCode, and Kimi — or `CLAUDE.md` (Claude Code) so agents adopt the workflow:
+Add this block to your project's `AGENTS.md` (read by
+most coding agents, including Codex, OpenCode, Pi, ZCode, and Kimi Code) or `CLAUDE.md` (Claude Code) so agents adopt the workflow:
 
 ```markdown
 ## Project memory (agent-memoize MCP)
@@ -166,7 +170,7 @@ Codex, OpenCode, Pi, ZCode, and Kimi — or `CLAUDE.md` (Claude Code) so agents 
 | `memoize_invalidate(name?, confirm)` | Delete one entry, or the whole store when `name` is omitted. Requires `confirm=true` — the store is shared. |
 
 The `author` of each entry defaults to the MCP client's name (from the protocol handshake), so
-you can see whether Codex or Claude Code wrote a memory.
+you can see which coding agent wrote that memory.
 
 ## Store format
 
@@ -192,33 +196,6 @@ summary: Auth flow uses JWT middleware in src/auth/login.ts
 ---
 Free-form markdown...
 ```
-
-### How staleness is decided
-
-Each entry carries a baseline in `manifest.json`: the git state (HEAD + dirty files), the
-content hashes of its matched sources, and — under the default policy — the **claim regions**:
-the lines of each source file that the entry text actually references (identifiers and paths
-extracted from the content). `memoize_status` compares the baseline against the current
-workspace, per entry:
-
-- **Git repos**: HEAD moved → `git diff` between the commits gives precise changed/added/deleted
-  files. Dirty-set differences catch uncommitted edits. Files that were dirty at baseline *and*
-  now are re-verified by hash (git state alone cannot see a second edit to the same dirty file).
-- **Non-git**: content hashes of matched sources, with an mtime+size pre-check so unchanged
-  files are never re-hashed.
-
-Then the **staleness policy** decides what counts as stale:
-
-| Policy | Cosmetic edits (whitespace/comments) | Non-claim edits | Claim-line edits | New files in `sources` |
-| --- | --- | --- | --- | --- |
-| `strict` | stale | stale | stale | stale |
-| `claims` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale |
-| `cosmetic-only` | fresh | auto re-baselined | **stale** | stale |
-
-A **claim line** is a line of a source file that the entry text references; staleness is judged
-on claim lines only, and the check is position-independent (inserting or removing lines
-elsewhere in the file does not invalidate the memory). `changedSources` is narrowed to the
-files whose claim lines actually broke.
 
 Recovery is automatic where it is safe:
 
@@ -420,3 +397,30 @@ npm test          # builds, then runs unit + MCP-over-stdio integration tests
 ```
 
 Publishing: `npm publish` (`prepublishOnly` runs build + tests; only `dist/` ships).
+
+### How staleness is decided
+
+Each entry carries a baseline in `manifest.json`: the git state (HEAD + dirty files), the
+content hashes of its matched sources, and — under the default policy — the **claim regions**:
+the lines of each source file that the entry text actually references (identifiers and paths
+extracted from the content). `memoize_status` compares the baseline against the current
+workspace, per entry:
+
+- **Git repos**: HEAD moved → `git diff` between the commits gives precise changed/added/deleted
+  files. Dirty-set differences catch uncommitted edits. Files that were dirty at baseline *and*
+  now are re-verified by hash (git state alone cannot see a second edit to the same dirty file).
+- **Non-git**: content hashes of matched sources, with an mtime+size pre-check so unchanged
+  files are never re-hashed.
+
+Then the **staleness policy** decides what counts as stale:
+
+| Policy | Cosmetic edits (whitespace/comments) | Non-claim edits | Claim-line edits | New files in `sources` |
+| --- | --- | --- | --- | --- |
+| `strict` | stale | stale | stale | stale |
+| `claims` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale |
+| `cosmetic-only` | fresh | auto re-baselined | **stale** | stale |
+
+A **claim line** is a line of a source file that the entry text references; staleness is judged
+on claim lines only, and the check is position-independent (inserting or removing lines
+elsewhere in the file does not invalidate the memory). `changedSources` is narrowed to the
+files whose claim lines actually broke.
