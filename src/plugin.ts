@@ -155,6 +155,8 @@ export interface RecallCandidate {
   entry: Entry;
   status: EntryStatus;
   changedSources: string[];
+  /** Claim regions that no longer match (present when status is "stale"). */
+  brokenClaims?: { path: string; line: number; end?: number; kind?: "line" | "block" }[];
   annotations: Record<string, unknown>;
 }
 

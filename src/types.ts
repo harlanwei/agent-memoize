@@ -35,14 +35,25 @@ export interface FileFingerprint {
 }
 
 /**
- * A line in a source file that the entry's text references. Staleness for
- * "claims"/"cosmetic-only" policies is judged on these lines only.
+ * A region in a source file that the entry's text references. Staleness for
+ * "claims"/"cosmetic-only" policies is judged on these regions only.
+ *
+ * A region is normally a single line, but may span a balanced block (function,
+ * object, etc.) opened at `line` and closing at `end` — such a claim survives
+ * as long as the block's content still exists somewhere in the file, even if
+ * reformatted or reordered.
  */
 export interface ClaimRegion {
-  /** 1-based line number. */
+  /** 1-based line number where the claim starts. */
   line: number;
-  /** sha256 of the line with trailing whitespace stripped. */
+  /** 1-based inclusive end line for block claims; omitted for single-line claims. */
+  end?: number;
+  /** "block" spans a balanced block from line..end; "line" (default) is a single line. */
+  kind?: "line" | "block";
+  /** sha256 of the normalized region content. */
   hash: string;
+  /** 1 = legacy (trailing-whitespace strip only); 2 = normalized line/block hash. */
+  hashVersion?: 1 | 2;
 }
 
 /**
@@ -70,6 +81,8 @@ export interface StaleEntry {
   name: string;
   /** Changed/added/deleted paths that intersect the entry's sources. */
   changedSources: string[];
+  /** Claim regions whose hashes no longer match the current file content (capped). */
+  brokenClaims?: { path: string; line: number; end?: number; kind?: "line" | "block" }[];
 }
 
 export interface StatusResult {

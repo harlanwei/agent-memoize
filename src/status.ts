@@ -9,8 +9,10 @@ import {
 } from "./git.js";
 import {
   claimLines,
-  claimsIntact,
   classifyChange,
+  entryReferencesFile,
+  extractTokens,
+  findBrokenClaims,
   fingerprint,
   findRename,
   matchesAny,
@@ -164,15 +166,34 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
 
     // Claim-scoped triage per hit file.
     const entryStaleSources: string[] = [];
+    const entryBrokenClaims: { path: string; line: number; end?: number; kind?: "line" | "block" }[] = [];
     let unrecoveredDelete = false;
     let needsRebaseline = false;
     const renames: { from: string; to: string }[] = [];
 
     for (const p of hitsOf(ec, ea, ed, e.sources)) {
       if (ea.has(p)) {
-        // A new file inside the sources: the entry's coverage changed —
-        // always worth agent attention, under every policy.
-        entryStaleSources.push(p);
+        // A new file inside the sources glob. Under "strict" this always stales.
+        // Under claim-aware policies, an unrelated new file (one the entry's text
+        // doesn't reference) only re-baselines coverage — it doesn't break any
+        // existing claim. If the entry has no token coverage at all we can't prove
+        // the file is unrelated, so surface it to preserve the safety property.
+        if (normalized(ctx)) {
+          const text = e.content + "\n" + e.summary;
+          const referenced = await entryReferencesFile(root, p, text);
+          if (referenced) {
+            entryStaleSources.push(p);
+          } else if (extractTokens(text).size === 0) {
+            // No token coverage to prove the file is unrelated — surface it.
+            entryStaleSources.push(p);
+          } else {
+            // Unrelated new file: refresh coverage without invalidating claims.
+            added.add(p);
+            needsRebaseline = true;
+          }
+        } else {
+          entryStaleSources.push(p);
+        }
         continue;
       }
       if (ed.has(p)) {
@@ -200,11 +221,20 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       }
       const claims = base?.claims?.[p];
       if (claims && claims.length > 0) {
-        if (await claimsIntact(root, p, claims)) {
+        const broken = await findBrokenClaims(root, p, claims);
+        if (broken.length === 0) {
           needsRebaseline = true;
           continue;
         }
         entryStaleSources.push(p);
+        for (const b of broken.slice(0, 10)) {
+          entryBrokenClaims.push({
+            path: p,
+            line: b.line,
+            end: b.end,
+            kind: b.kind,
+          });
+        }
         continue;
       }
       // No claims for this file (old baseline or degenerate entry): whole-file rule.
@@ -224,7 +254,11 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         // the entry needs attention, not a stale re-read.
         suspended.push(e.name);
       } else {
-        stale.push({ name: e.name, changedSources: [...new Set(entryStaleSources)].sort() });
+        stale.push({
+          name: e.name,
+          changedSources: [...new Set(entryStaleSources)].sort(),
+          brokenClaims: entryBrokenClaims.length > 0 ? entryBrokenClaims : undefined,
+        });
       }
       if (needsRebaseline) reBaseline.set(e.name, { name: e.name, sources: e.sources });
     } else if (matched.length === 0 && renames.length === 0) {

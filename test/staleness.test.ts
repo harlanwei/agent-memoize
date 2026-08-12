@@ -3,7 +3,16 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { updateEntry } from "../src/service.js";
 import { computeStatusForRoot as computeStatus } from "../src/status.js";
-import { claimLines, extractTokens, normalizeContent, storePath } from "../src/workspace.js";
+import {
+  claimLines,
+  entryReferencesFile,
+  extractTokens,
+  findBrokenClaims,
+  lineHash,
+  normalizeContent,
+  normalizeLine,
+  storePath,
+} from "../src/workspace.js";
 import { tmpDir, write } from "./helpers.js";
 
 // File whose content shares tokens with the entry text, so claim regions exist.
@@ -43,9 +52,16 @@ describe("claim extraction", () => {
     const tokens = extractTokens("Auth login uses jsonwebtoken middleware.");
     expect(tokens.has("login")).toBe(true);
     expect(tokens.has("jsonwebtoken")).toBe(true);
-    expect(tokens.has("uses")).toBe(false); // stopword
+    expect(tokens.has("Auth")).toBe(true); // 3-char identifiers are now accepted
+    expect(tokens.has("uses")).toBe(true); // "uses" is no longer a stopword
     const claims = await claimLines(dir, "a.ts", "Auth login uses jsonwebtoken middleware.");
+    // Line 1 (import) is a single-line claim; line 3 opens a block claim spanning 3-5.
+    // Line 4 has no matching token (no "jsonwebtoken" there), so no claim.
     expect(claims.map((c) => c.line)).toEqual([1, 3]);
+    const block = claims.find((c) => c.kind === "block");
+    expect(block).toBeDefined();
+    expect(block!.line).toBe(3);
+    expect(block!.end).toBe(5);
   });
 
   it("normalizeContent strips trailing whitespace and blank lines", () => {
@@ -59,6 +75,68 @@ describe("claim extraction", () => {
       ext: ".ts",
     });
     expect(n).toBe("a\nb\n# not-a-comment");
+  });
+
+  it("extracts 3-character identifier tokens", () => {
+    const tokens = extractTokens("The foo helper does work.");
+    expect(tokens.has("foo")).toBe(true);
+    expect(tokens.has("helper")).toBe(true);
+    // "the" and "does" remain non-tokens: "the" is a stopword, "does" is < 3? no, 4 chars but a stopword-adjacent word kept.
+  });
+
+  it("word-boundary matching: 'auth' does not match 'authority'", async () => {
+    const dir = await tmpDir();
+    // File contains "authority" but not the standalone word "auth".
+    await write(dir, "a.ts", "export const authority = 'admin';\n");
+    const tokens = extractTokens("Describes the auth flow.");
+    expect(tokens.has("auth")).toBe(true);
+    const claims = await claimLines(dir, "a.ts", "Describes the auth flow.");
+    // No claim: "auth" is a substring of "authority" but not a word-boundary match.
+    expect(claims).toEqual([]);
+  });
+
+  it("path-like tokens still match by substring", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.ts", "// see src/auth/login.ts for details\n");
+    const claims = await claimLines(dir, "a.ts", "References src/auth/login.ts module.");
+    expect(claims.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Change A: normalized claim-line hashes", () => {
+  it("normalizeLine collapses internal whitespace and strips trailing semicolons", () => {
+    expect(normalizeLine("const   x   =   1;", ".ts")).toBe("const x = 1");
+    expect(normalizeLine("foo()  ", ".ts")).toBe("foo()");
+  });
+
+  it("normalizeLine strips trailing inline comments", () => {
+    expect(normalizeLine("const x = 1  // default", ".ts")).toBe("const x = 1");
+    expect(normalizeLine("x = 1 # py comment", ".py")).toBe("x = 1");
+  });
+
+  it("lineHash is stable across trailing-comment and whitespace edits", () => {
+    const base = lineHash("export function login(user, password) {", ".ts");
+    expect(lineHash("export function login(user, password) {  // entrypoint", ".ts")).toBe(base);
+    expect(lineHash("export   function   login(user,  password)  {", ".ts")).toBe(base);
+    expect(lineHash("export function login(user, password) {;", ".ts")).toBe(base);
+  });
+
+  it("a claim line survives a trailing-comment edit (stays fresh/verified)", async () => {
+    const dir = await tmpDir();
+    // Single-line source with no block so the claim is line-level.
+    await write(dir, "src/cfg.ts", "export const timeout = 5000;\n");
+    await updateEntry(dir, {
+      name: "cfg",
+      kind: "file",
+      sources: ["src/cfg.ts"],
+      content: "The timeout config.",
+      author: "test",
+    });
+    await tick();
+    // Add a trailing comment to the claimed line.
+    await write(dir, "src/cfg.ts", "export const timeout = 5000; // ms\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
   });
 });
 
@@ -139,6 +217,50 @@ describe("staleness matrix (claims policy, default)", () => {
   });
 });
 
+describe("Change B: block claim regions", () => {
+  it("captures a block claim for a token line that opens a brace block", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.ts", LOGIN_SRC);
+    const claims = await claimLines(dir, "a.ts", "The login function signs tokens.");
+    const block = claims.find((c) => c.kind === "block");
+    expect(block).toBeDefined();
+    expect(block!.line).toBe(3);
+    expect(block!.end).toBe(5);
+  });
+
+  it("block claim survives a body edit that doesn't touch the block's content", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, entry);
+    await tick();
+    // Insert a comment line above the function — the block moves down but is unchanged.
+    await write(dir, "src/auth/login.ts", "// header note\n" + LOGIN_SRC);
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+  });
+
+  it("block claim goes stale when the block's content changes", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, entry);
+    await tick();
+    // Change a line inside the block body.
+    await write(dir, "src/auth/login.ts", LOGIN_SRC.replace("jwt.sign({ user })", "jwt.sign({ user, role })"));
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+  });
+
+  it("does not treat a non-brace line as a block start", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.ts", "const greeting = 'hello'\nexport function f() { return 1 }\n");
+    // Token "greeting" is on line 1, which has no '{' → single-line claim, not a block.
+    const claims = await claimLines(dir, "a.ts", "The greeting constant.");
+    const line1 = claims.find((c) => c.line === 1);
+    expect(line1).toBeDefined();
+    expect(line1!.kind ?? "line").toBe("line");
+  });
+});
+
 describe("staleness policies", () => {
   it("strict: any change invalidates (old behavior)", async () => {
     process.env.MEMOIZE_STALENESS = "strict";
@@ -163,14 +285,70 @@ describe("staleness policies", () => {
   });
 });
 
-describe("new files inside a sources glob always require attention", () => {
-  it("marks the entry stale when a new file appears", async () => {
+describe("Change C: new files inside a sources glob", () => {
+  it("does NOT stale on an unrelated new file under claim-aware policies", async () => {
     const dir = await tmpDir();
     await write(dir, "src/auth/login.ts", LOGIN_SRC);
     await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
-    await write(dir, "src/auth/session.ts", "new\n");
+    await write(dir, "src/auth/session.ts", "totally unrelated content here\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+  });
+
+  it("STALES on a new file the entry references", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
+    // New file mentions the entry's token 'login' as a standalone word.
+    await write(dir, "src/auth/session.ts", "export const login = true;\n");
     const s = await computeStatus(dir);
     expect(s.state).toBe("stale");
     expect(s.addedFiles).toContain("src/auth/session.ts");
+  });
+
+  it("strict policy: any new file stales (old behavior preserved)", async () => {
+    process.env.MEMOIZE_STALENESS = "strict";
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
+    await write(dir, "src/auth/unrelated.ts", "totally unrelated\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    delete process.env.MEMOIZE_STALENESS;
+  });
+
+  it("entryReferencesFile honors word boundaries", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.ts", "export const authority = 1;\n");
+    expect(await entryReferencesFile(dir, "a.ts", "Describes auth.")).toBe(false);
+    await write(dir, "b.ts", "export const auth = true;\n");
+    expect(await entryReferencesFile(dir, "b.ts", "Describes auth.")).toBe(true);
+  });
+});
+
+describe("Change F: broken claim regions surfaced", () => {
+  it("findBrokenClaims returns the specific broken regions", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.ts", LOGIN_SRC);
+    const claims = await claimLines(dir, "a.ts", "The login function uses jwt.");
+    // Mutate the block body.
+    await write(dir, "a.ts", LOGIN_SRC.replace("jwt.sign({ user })", "jwt.sign({ user, role })"));
+    const broken = await findBrokenClaims(dir, "a.ts", claims);
+    expect(broken.length).toBeGreaterThan(0);
+    expect(broken.some((b) => b.kind === "block")).toBe(true);
+  });
+
+  it("status surfaces brokenClaims on a stale entry", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, entry);
+    await tick();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC.replace("jwt.sign({ user })", "jwt.sign({ user, role })"));
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    const stale0 = s.staleEntries[0];
+    expect(stale0.brokenClaims).toBeDefined();
+    expect(stale0.brokenClaims!.length).toBeGreaterThan(0);
+    expect(stale0.brokenClaims![0].path).toBe("src/auth/login.ts");
   });
 });

@@ -10,7 +10,7 @@ import {
   walkTree,
 } from "./workspace.js";
 import { getRegistry, type Registry } from "./plugins/registry.js";
-import type { DebuggingPlugin, MemoryAccessEvent, PostprocessOperation, UpdateArgs } from "./plugin.js";
+import type { DebuggingPlugin, MemoryAccessEvent, PostprocessOperation, RecallCandidate, UpdateArgs } from "./plugin.js";
 import type { ClaimRegion, Entry, EntryStatus, FileFingerprint, Manifest } from "./types.js";
 
 export { entryFilePath } from "./plugins/builtin/db-files.js";
@@ -200,11 +200,11 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
   if (status.state === "empty") return { state: "empty" as const, entries: [] };
 
   const { entries } = await registry.primaryDb.listEntries();
-  const staleMap = new Map(status.staleEntries.map((s) => [s.name, s.changedSources]));
+  const staleMap = new Map(status.staleEntries.map((s) => [s.name, s]));
   const verifiedSet = new Set(status.verifiedEntries);
   const suspendedSet = new Set(status.suspendedEntries);
 
-  let candidates = entries.map((e) => ({
+  let candidates: RecallCandidate[] = entries.map((e) => ({
     entry: e,
     status: (staleMap.has(e.name)
       ? "stale"
@@ -213,7 +213,8 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         : verifiedSet.has(e.name)
           ? "verified"
           : "fresh") as EntryStatus,
-    changedSources: staleMap.get(e.name) ?? [],
+    changedSources: staleMap.get(e.name)?.changedSources ?? [],
+    brokenClaims: staleMap.get(e.name)?.brokenClaims,
     annotations: {} as Record<string, unknown>,
   }));
 
@@ -251,7 +252,11 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         stale: true as const,
         status: "stale" as const,
         changedSources: c.changedSources,
-        hint: "Memory is stale: re-read the changed source files, then call memoize_update to refresh this entry.",
+        ...(c.brokenClaims && c.brokenClaims.length > 0 ? { brokenClaims: c.brokenClaims } : {}),
+        hint:
+          c.brokenClaims && c.brokenClaims.length > 0
+            ? "Memory is stale: the listed claim regions no longer match. Re-read those specific source regions and patch this entry in place via memoize_update."
+            : "Memory is stale: re-read the changed source files, then call memoize_update to refresh this entry.",
         ...c.annotations,
       };
     } else if (c.status === "suspended") {

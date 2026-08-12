@@ -210,33 +210,222 @@ const STOPWORDS = new Set([
   "under", "until", "using", "very", "when", "where", "which", "while", "with", "would", "your",
   "entry", "entries", "memory", "memories", "note", "notes", "source", "sources", "content",
   "summary", "author", "updated", "stale", "fresh", "decision", "decisions", "project", "file",
-  "files", "markdown", "module", "modules", "type", "kind", "name", "text", "body", "line",
-  "lines", "code", "docs", "documentation", "describe", "describes", "contains", "provides", "uses",
-  "returns", "takes", "user", "users", "agent", "agents", "handled", "handles", "handling",
+  "files", "markdown", "modules", "text", "body",
+  "lines", "docs", "documentation", "describe", "describes", "contains", "provides",
+  "takes", "users", "agents", "handled", "handles", "handling",
 ]);
 
-/** Significant tokens from entry text: identifiers and path-like tokens, minus stopwords. */
+/**
+ * Significant tokens from entry text: identifiers and path-like tokens, minus stopwords.
+ * Identifiers ≥3 chars are accepted (was 4) so entries about short-named symbols still
+ * get claim coverage; path-like tokens still require ≥4 chars. Common code/symbol words
+ * that were previously stripped (type, name, value, kind, mode, key, data, item, module,
+ * code, line, returns, uses, user, agent) are now kept, since they are frequently real
+ * identifiers referenced by the entry.
+ */
 export function extractTokens(text: string): Set<string> {
   const tokens = new Set<string>();
-  for (const re of [IDENT_RE, PATH_RE]) {
-    re.lastIndex = 0;
-    for (const m of text.matchAll(re)) {
-      const t = m[0];
-      if (t.length < 4) continue;
-      if (STOPWORDS.has(t.toLowerCase())) continue;
-      tokens.add(t);
-    }
+  IDENT_RE.lastIndex = 0;
+  for (const m of text.matchAll(IDENT_RE)) {
+    const t = m[0];
+    if (t.length < 3) continue;
+    if (STOPWORDS.has(t.toLowerCase())) continue;
+    tokens.add(t);
+  }
+  PATH_RE.lastIndex = 0;
+  for (const m of text.matchAll(PATH_RE)) {
+    const t = m[0];
+    if (t.length < 4) continue;
+    if (STOPWORDS.has(t.toLowerCase())) continue;
+    tokens.add(t);
   }
   return tokens;
 }
 
-export function lineHash(line: string): string {
-  return createHash("sha256").update(line.replace(/\s+$/, "")).digest("hex");
+/** Escape a string for literal inclusion in a RegExp. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Lines of rel that reference tokens from the entry text — the claim regions.
- * Empty when no token appears in the file (caller falls back to whole-file checks).
+ * Build a single word-boundary RegExp that matches any of the given identifier tokens.
+ * Path-like tokens (containing "/" or ".") are returned separately for substring matching,
+ * since they are not word-shaped.
+ */
+function buildTokenMatcher(tokens: Iterable<string>): { wordRe: RegExp | null; paths: string[] } {
+  const idents: string[] = [];
+  const paths: string[] = [];
+  for (const t of tokens) {
+    if (t.includes("/") || /\.[A-Za-z0-9]{1,5}$/.test(t)) paths.push(t);
+    else idents.push(t);
+  }
+  const wordRe = idents.length
+    ? new RegExp(`(?:^|[^\\w])(${idents.map(reEscape).join("|")})(?:$|[^\\w])`)
+    : null;
+  return { wordRe, paths };
+}
+
+/**
+ * True if any token from `text` is referenced by the file `rel`'s content.
+ * Identifier tokens match on word boundaries (so "auth" ≠ "authority");
+ * path-like tokens match by substring. Used to decide whether a newly-added
+ * file is plausibly relevant to an entry.
+ */
+export async function entryReferencesFile(
+  root: string,
+  rel: string,
+  text: string,
+): Promise<boolean> {
+  const tokens = extractTokens(text);
+  if (tokens.size === 0) return false;
+  let content;
+  try {
+    content = await fs.readFile(path.join(root, rel), "utf8");
+  } catch {
+    return false;
+  }
+  const { wordRe, paths } = buildTokenMatcher(tokens);
+  if (paths.some((p) => content.includes(p))) return true;
+  return wordRe ? wordRe.test(content) : false;
+}
+
+/**
+ * Strip a trailing inline comment from a line (e.g. `code // comment` → `code`),
+ * honoring string literals so a `//` inside quotes isn't treated as a comment.
+ * Only line-comment markers from the file's COMMENT_SPECS entry are considered.
+ */
+function stripInlineComment(line: string, spec: CommentSpec | undefined): string {
+  if (!spec?.line) return line;
+  const markers = spec.line;
+  let inStr: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inStr) {
+      if (ch === inStr && line[i - 1] !== "\\") inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      inStr = ch;
+      continue;
+    }
+    for (const m of markers) {
+      if (line.startsWith(m, i)) return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+/**
+ * Normalize a single line for stable hashing: collapse internal whitespace
+ * runs to one space, strip trailing whitespace, drop trailing inline comments
+ * (per file extension), and strip a single trailing incidental semicolon.
+ * Whitespace/comment/semicolon-only edits no longer break a claim line.
+ */
+export function normalizeLine(line: string, ext?: string): string {
+  const spec = ext ? COMMENT_SPECS[ext] : undefined;
+  let l = line.replace(/\s+/g, " ").trim();
+  if (spec) l = stripInlineComment(l, spec).trim();
+  // A trailing semicolon is incidental for most languages; stripping it keeps
+  // `x` and `x;` hash-equal. Only one is stripped to avoid mangling `;;`-style syntax.
+  if (l.endsWith(";")) l = l.slice(0, -1).trimEnd();
+  return l;
+}
+
+/** Hash a normalized line (hashVersion 2). */
+export function lineHash(line: string, ext?: string): string {
+  return createHash("sha256").update(normalizeLine(line, ext)).digest("hex");
+}
+
+/** Legacy single-line hash (hashVersion 1): trailing whitespace stripped only. */
+function legacyLineHash(line: string): string {
+  return createHash("sha256").update(line.replace(/\s+$/, "")).digest("hex");
+}
+
+/** Hash a normalized multi-line block (lines joined with "\n") for hashVersion 2. */
+function blockHash(lines: string[], ext?: string): string {
+  return createHash("sha256")
+    .update(lines.map((l) => normalizeLine(l, ext)).join("\n"))
+    .digest("hex");
+}
+
+/**
+ * Find the closing line index (0-based) of a brace-delimited block whose
+ * opening `{` is on `startIdx` itself, honoring string/comment context so
+ * braces inside literals or comments don't affect nesting. Returns -1 when
+ * `startIdx` doesn't open a block (no unmatched `{` on that line) or the
+ * block is unbalanced.
+ */
+function findBlockEnd(lines: string[], startIdx: number, ext?: string): number {
+  const spec = ext ? COMMENT_SPECS[ext] : undefined;
+  const blockPair = spec?.block;
+  const lineMarkers = spec?.line ?? [];
+
+  // Context-aware scan of a single line: returns the net brace delta and
+  // whether the line opened a string/block comment that continues past its end.
+  const scanLine = (
+    line: string,
+    ctx: { inStr: string | null; inBlock: boolean },
+  ): { delta: number; lastOpenIdx: number } => {
+    let delta = 0;
+    let lastOpenIdx = -1;
+    for (let j = 0; j < line.length; j++) {
+      const ch = line[j];
+      const rest = line.slice(j);
+      if (ctx.inStr) {
+        if (ch === ctx.inStr && line[j - 1] !== "\\") ctx.inStr = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        ctx.inStr = ch;
+        continue;
+      }
+      if (blockPair) {
+        if (rest.startsWith(blockPair[0])) {
+          const closeInRest = rest.slice(blockPair[0].length).indexOf(blockPair[1]);
+          if (closeInRest < 0) {
+            ctx.inBlock = true;
+            break;
+          }
+          j += blockPair[0].length + closeInRest + blockPair[1].length - 1;
+          continue;
+        }
+        if (ctx.inBlock && rest.includes(blockPair[1])) {
+          ctx.inBlock = false;
+        }
+      }
+      if (ctx.inBlock) continue;
+      if (lineMarkers.some((m) => rest.startsWith(m))) break;
+      if (ch === "{") {
+        delta++;
+        lastOpenIdx = j;
+      } else if (ch === "}") {
+        delta--;
+      }
+    }
+    return { delta, lastOpenIdx };
+  };
+
+  // The opening line must itself contain an unmatched `{`.
+  const ctx = { inStr: null as string | null, inBlock: false };
+  const first = scanLine(lines[startIdx], ctx);
+  if (first.delta <= 0) return -1; // no unmatched open brace on the start line
+
+  let depth = first.delta;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const { delta } = scanLine(lines[i], ctx);
+    depth += delta;
+    if (depth <= 0) return i;
+  }
+  return -1; // unbalanced
+}
+
+/**
+ * Regions of `rel` that reference tokens from the entry text — the claim regions.
+ * A token-hit line that opens a balanced `{ }` block becomes a block claim
+ * spanning the block; otherwise a single-line claim. A block claim stays intact
+ * as long as its exact normalized content still appears as a contiguous run
+ * somewhere in the file (it may have moved). Empty when no token appears in the
+ * file (caller falls back to whole-file checks). All hashes are hashVersion 2.
  */
 export async function claimLines(
   root: string,
@@ -252,44 +441,108 @@ export async function claimLines(
   } catch {
     return [];
   }
-  const out: ClaimRegion[] = [];
+  const ext = path.extname(rel);
   const lines = content.split("\n");
+  const { wordRe, paths } = buildTokenMatcher(tokens);
+  const lineMatches = (line: string): boolean => {
+    if (paths.some((p) => line.includes(p))) return true;
+    return wordRe ? wordRe.test(line) : false;
+  };
+  const out: ClaimRegion[] = [];
+  const claimedLines = new Set<number>();
   for (let i = 0; i < lines.length && out.length < cap; i++) {
-    const line = lines[i];
-    for (const t of tokens) {
-      if (line.includes(t)) {
-        out.push({ line: i + 1, hash: lineHash(line) });
-        break;
-      }
+    if (!lineMatches(lines[i])) continue;
+    const endIdx = findBlockEnd(lines, i, ext);
+    if (endIdx > i) {
+      const blockLines = lines.slice(i, endIdx + 1);
+      for (let k = i; k <= endIdx; k++) claimedLines.add(k);
+      out.push({
+        line: i + 1,
+        end: endIdx + 1,
+        kind: "block",
+        hash: blockHash(blockLines, ext),
+        hashVersion: 2,
+      });
+    } else {
+      out.push({ line: i + 1, hash: lineHash(lines[i], ext), hashVersion: 2 });
     }
   }
   return out;
 }
 
-/** True when every claim line still exists somewhere in the file.
- * Position-independent: an edit that inserts or removes lines elsewhere
- * shifts line numbers but not content, so a claim is broken only when the
- * referenced line text is actually gone (or its whitespace changed). */
+/**
+ * Multiset of every line hash (both legacy v1 and normalized v2) for the
+ * current file content, so a stored claim hash matches regardless of which
+ * hashVersion it was captured under.
+ */
+function currentLineHashes(lines: string[], ext?: string): Map<string, number> {
+  const present = new Map<string, number>();
+  for (const line of lines) {
+    // Compute both; cost is negligible relative to the file read.
+    const inc = (h: string) => present.set(h, (present.get(h) ?? 0) + 1);
+    inc(legacyLineHash(line));
+    inc(lineHash(line, ext));
+  }
+  return present;
+}
+
+/**
+ * Claim regions whose hashes are no longer present in the current file content.
+ * Single-line claims match on their stored hash (both v1 legacy and v2
+ * normalized hashes are precomputed for the current file). Block claims are
+ * position-independent: their composite hash must reproduce from some
+ * contiguous run of lines anywhere in the file (see blockHashExists).
+ */
+export async function findBrokenClaims(
+  root: string,
+  rel: string,
+  claims: ClaimRegion[],
+): Promise<ClaimRegion[]> {
+  if (claims.length === 0) return [];
+  let content;
+  try {
+    content = await fs.readFile(path.join(root, rel), "utf8");
+  } catch {
+    return claims; // file gone → every claim is broken
+  }
+  const ext = path.extname(rel);
+  const lines = content.split("\n");
+  const present = currentLineHashes(lines, ext);
+  const broken: ClaimRegion[] = [];
+  for (const c of claims) {
+    if (c.kind === "block" && c.end && c.hashVersion === 2) {
+      // Block claims are verified position-independently by content (see blockHashExists).
+      if (blockHashExists(lines, c, ext)) continue;
+      broken.push(c);
+    } else {
+      if (!present.has(c.hash)) broken.push(c);
+    }
+  }
+  return broken;
+}
+
+/**
+ * A block claim is intact when its stored composite hash can be reproduced from
+ * some contiguous run of lines (of the original span length) anywhere in the
+ * current file. This makes the check position-independent — the block may have
+ * moved — while still requiring the block's exact normalized content (as a
+ * unit) to be present. Reordering lines within the block is treated as a change.
+ */
+function blockHashExists(lines: string[], c: ClaimRegion, ext?: string): boolean {
+  const span = c.end! - c.line + 1;
+  for (let i = 0; i + span <= lines.length; i++) {
+    if (blockHash(lines.slice(i, i + span), ext) === c.hash) return true;
+  }
+  return false;
+}
+
+/** True when every claim region still exists somewhere in the file. */
 export async function claimsIntact(
   root: string,
   rel: string,
   claims: ClaimRegion[],
 ): Promise<boolean> {
-  let content;
-  try {
-    content = await fs.readFile(path.join(root, rel), "utf8");
-  } catch {
-    return false;
-  }
-  const present = new Map<string, number>();
-  for (const line of content.split("\n")) {
-    const h = lineHash(line);
-    present.set(h, (present.get(h) ?? 0) + 1);
-  }
-  for (const c of claims) {
-    if (!present.has(c.hash)) return false;
-  }
-  return true;
+  return (await findBrokenClaims(root, rel, claims)).length === 0;
 }
 
 // ---------- rename recovery (Layer 3) ----------
