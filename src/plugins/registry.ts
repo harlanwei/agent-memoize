@@ -5,18 +5,35 @@ import type {
   BasePlugin,
   DataSourcePlugin,
   DatabasePlugin,
+  DebuggingPlugin,
   FilterPlugin,
   FormatPlugin,
   PluginConfig,
   PluginContext,
   PluginType,
+  PostprocessPlugin,
   ToolRegistration,
 } from "../plugin.js";
 import { storePath } from "../workspace.js";
 import type { StalenessPolicy } from "../types.js";
 
-export type { BasePlugin, DataSourcePlugin, DatabasePlugin, FilterPlugin, FormatPlugin };
-export type { PluginConfig, PluginContext, PluginRegistryConfig, ToolRegistration } from "../plugin.js";
+export type {
+  BasePlugin,
+  DataSourcePlugin,
+  DatabasePlugin,
+  DebuggingPlugin,
+  FilterPlugin,
+  FormatPlugin,
+  PostprocessPlugin,
+};
+export type {
+  MemoryAccessEvent,
+  PluginConfig,
+  PluginContext,
+  PluginRegistryConfig,
+  PostprocessOperation,
+  ToolRegistration,
+} from "../plugin.js";
 
 const BUILTIN_MODULES: Record<string, () => Promise<{ plugin: BasePlugin }>> = {
   files: () => import("./builtin/db-files.js"),
@@ -59,6 +76,8 @@ export class Registry {
   databases: DatabasePlugin[] = [];
   formats: FormatPlugin[] = [];
   filters: FilterPlugin[] = [];
+  postprocessors: PostprocessPlugin[] = [];
+  debuggers: DebuggingPlugin[] = [];
   tools: ToolRegistration[] = [];
   primaryDb!: DatabasePlugin;
 
@@ -87,16 +106,19 @@ export class Registry {
     // then fill missing types with the defaults so behavior never degrades.
     const loaded = new Map<string, BasePlugin>();
     const priority = new Map<string, number>();
+    const cfgByPlugin = new Map<BasePlugin, PluginConfig>();
     for (const cfg of plugins) {
       const p = await loadOne(cfg.id, cfg.options ?? {}, loader);
       loaded.set(cfg.id, p);
       priority.set(cfg.id, cfg.priority);
+      cfgByPlugin.set(p, cfg);
     }
     for (const def of DEFAULT_PLUGINS) {
       if (loaded.has(def.id)) continue;
       const p = await loadOne(def.id, def.options ?? {}, loader);
       loaded.set(def.id, p);
       priority.set(def.id, def.priority);
+      cfgByPlugin.set(p, def);
     }
     const byType = new Map<PluginType, BasePlugin[]>();
     for (const type of TYPES) byType.set(type, []);
@@ -113,7 +135,10 @@ export class Registry {
         registry.primaryDb = registry.databases[0];
       } else if (type === "datasource") registry.datasources = sorted as DataSourcePlugin[];
       else if (type === "format") registry.formats = sorted as FormatPlugin[];
-      else registry.filters = sorted as FilterPlugin[];
+      else if (type === "filter") registry.filters = sorted as FilterPlugin[];
+      else if (type === "postprocessing")
+        registry.postprocessors = sorted as PostprocessPlugin[];
+      else registry.debuggers = sorted as DebuggingPlugin[];
     }
 
     // Databases init first so ctx.db is set before other plugins run.
@@ -122,11 +147,12 @@ export class Registry {
       ...registry.datasources,
       ...registry.formats,
       ...registry.filters,
+      ...registry.postprocessors,
+      ...registry.debuggers,
     ];
     registry.initOrder.push(...ordered);
     for (const plugin of ordered) {
-      const cfg = plugins.find((c) => c.id === plugin.id);
-      await plugin.init?.(registry.ctxFor(plugin, cfg?.options ?? {}));
+      await plugin.init?.(registry.ctxFor(plugin, cfgByPlugin.get(plugin)?.options ?? {}));
     }
     return registry;
   }
@@ -247,7 +273,14 @@ function validatePluginList(plugins: PluginConfig[]): void {
 }
 
 /** Group configs by type; built-in ids are known, external ids classify after load. */
-const TYPES: PluginType[] = ["datasource", "database", "format", "filter"];
+const TYPES: PluginType[] = [
+  "datasource",
+  "database",
+  "format",
+  "filter",
+  "postprocessing",
+  "debugging",
+];
 
 async function loadOne(
   id: string,

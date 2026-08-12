@@ -10,7 +10,7 @@ import {
   walkTree,
 } from "./workspace.js";
 import { getRegistry, type Registry } from "./plugins/registry.js";
-import type { UpdateArgs } from "./plugin.js";
+import type { DebuggingPlugin, MemoryAccessEvent, PostprocessOperation, UpdateArgs } from "./plugin.js";
 import type { ClaimRegion, Entry, EntryStatus, FileFingerprint, Manifest } from "./types.js";
 
 export { entryFilePath } from "./plugins/builtin/db-files.js";
@@ -19,6 +19,38 @@ export { storePath };
 export interface ServiceContext {
   root: string;
   registry: Registry;
+  /** MCP client performing the operation (clientInfo.name); appears in debugging events. */
+  accessor?: string;
+}
+
+// ---------- plugin hooks ----------
+
+/** Post-processing chain: each plugin sees the previous one's output. */
+async function postprocessResults<T>(
+  ctx: ServiceContext,
+  op: PostprocessOperation,
+  result: T,
+): Promise<T | (T & Record<string, unknown>)> {
+  let out: unknown = result;
+  for (const p of ctx.registry.postprocessors) {
+    const r = await p.postprocess(op, out);
+    if (r !== undefined) out = r;
+  }
+  return out as T | (T & Record<string, unknown>);
+}
+
+/** Debugging hooks are observational: a failing hook never breaks the operation. */
+async function notifyDebuggers(
+  ctx: ServiceContext,
+  fire: (p: DebuggingPlugin) => Promise<void> | void,
+): Promise<void> {
+  for (const p of ctx.registry.debuggers) {
+    try {
+      await fire(p);
+    } catch (e) {
+      console.error(`[memoize] debugging plugin "${p.id}" failed: ${String(e)}`);
+    }
+  }
 }
 
 // ---------- status ----------
@@ -30,6 +62,12 @@ export function statusContext(ctx: ServiceContext): StatusContext {
     staleness: ctx.registry.staleness,
     ignoreComments: ctx.registry.ignoreComments,
   };
+}
+
+/** memoize_status: status result passed through the post-processing chain. */
+export async function statusCtx(ctx: ServiceContext) {
+  const result = await computeStatus(statusContext(ctx));
+  return postprocessResults(ctx, "status", result);
 }
 
 // ---------- update ----------
@@ -108,6 +146,7 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
 
   await fs.mkdir(storePath(root), { recursive: true });
   let updatedManifest: Manifest = { version: 1, entries: {} };
+  const existed = (await registry.primaryDb.readEntry(name)) !== null;
   await registry.primaryDb.withLock(async () => {
     await registry.primaryDb.writeEntry(entry);
     const m = await registry.primaryDb.loadManifest();
@@ -137,7 +176,7 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
     }
   }
 
-  return {
+  const result = {
     ok: true as const,
     name,
     matchedFiles: matched.length,
@@ -146,6 +185,11 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
       : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+  await notifyDebuggers(
+    ctx,
+    (p) => p.onMemoryCreated?.(entry, existed ? "refresh" : "create", ctx.accessor ?? "unknown"),
+  );
+  return postprocessResults(ctx, "update", result);
 }
 
 // ---------- recall ----------
@@ -177,8 +221,12 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
     candidates = (await f.filter({ topic }, candidates)) ?? candidates;
   }
 
+  let result: unknown;
+  let access: { topic?: string; entries: { name: string; status: EntryStatus | "missing" }[] };
+
   if (!topic) {
-    return {
+    access = { entries: candidates.map((c) => ({ name: c.entry.name, status: c.status })) };
+    result = {
       state: status.state,
       entries: candidates.map((c) => ({
         name: c.entry.name,
@@ -191,53 +239,60 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         ...c.annotations,
       })),
     };
+  } else {
+    const c = candidates.find((c) => c.entry.name === topic);
+    if (!c) {
+      access = { topic, entries: [{ name: topic, status: "missing" }] };
+      result = { error: `no entry "${topic}"`, available: candidates.map((c) => c.entry.name) };
+    } else if (c.status === "stale") {
+      access = { topic, entries: [{ name: topic, status: c.status }] };
+      result = {
+        name: topic,
+        stale: true as const,
+        status: "stale" as const,
+        changedSources: c.changedSources,
+        hint: "Memory is stale: re-read the changed source files, then call memoize_update to refresh this entry.",
+        ...c.annotations,
+      };
+    } else if (c.status === "suspended") {
+      access = { topic, entries: [{ name: topic, status: c.status }] };
+      result = {
+        name: topic,
+        stale: true as const,
+        status: "suspended" as const,
+        changedSources: c.changedSources,
+        hint: "Memory sources are gone or unmatched: re-check the files it describes, then call memoize_update to refresh this entry.",
+        ...c.annotations,
+      };
+    } else {
+      access = { topic, entries: [{ name: topic, status: c.status }] };
+      const formatAnnotations: Record<string, unknown> = {};
+      let rendered: unknown;
+      for (const f of registry.formats) {
+        const r = f.render?.(c.entry);
+        if (r === undefined || r === null) continue;
+        if (f === registry.formats[0]) rendered = r;
+        else formatAnnotations[f.id] = r;
+      }
+      const content = typeof rendered === "string" ? rendered : c.entry.content;
+      result = {
+        name: c.entry.name,
+        kind: c.entry.kind,
+        author: c.entry.author,
+        updated: c.entry.updated,
+        summary: c.entry.summary,
+        stale: false as const,
+        status: c.status,
+        content,
+        ...(Object.keys(formatAnnotations).length > 0 ? { format: formatAnnotations } : {}),
+        ...c.annotations,
+      };
+    }
   }
 
-  const c = candidates.find((c) => c.entry.name === topic);
-  if (!c) {
-    return { error: `no entry "${topic}"`, available: candidates.map((c) => c.entry.name) };
-  }
-  if (c.status === "stale") {
-    return {
-      name: topic,
-      stale: true as const,
-      status: "stale" as const,
-      changedSources: c.changedSources,
-      hint: "Memory is stale: re-read the changed source files, then call memoize_update to refresh this entry.",
-      ...c.annotations,
-    };
-  }
-  if (c.status === "suspended") {
-    return {
-      name: topic,
-      stale: true as const,
-      status: "suspended" as const,
-      changedSources: c.changedSources,
-      hint: "Memory sources are gone or unmatched: re-check the files it describes, then call memoize_update to refresh this entry.",
-      ...c.annotations,
-    };
-  }
-  const formatAnnotations: Record<string, unknown> = {};
-  let rendered: unknown;
-  for (const f of registry.formats) {
-    const r = f.render?.(c.entry);
-    if (r === undefined || r === null) continue;
-    if (f === registry.formats[0]) rendered = r;
-    else formatAnnotations[f.id] = r;
-  }
-  const content = typeof rendered === "string" ? rendered : c.entry.content;
-  return {
-    name: c.entry.name,
-    kind: c.entry.kind,
-    author: c.entry.author,
-    updated: c.entry.updated,
-    summary: c.entry.summary,
-    stale: false as const,
-    status: c.status,
-    content,
-    ...(Object.keys(formatAnnotations).length > 0 ? { format: formatAnnotations } : {}),
-    ...c.annotations,
-  };
+  const event: MemoryAccessEvent = { accessor: ctx.accessor ?? "unknown", ...access };
+  await notifyDebuggers(ctx, (p) => p.onMemoryAccessed?.(event));
+  return postprocessResults(ctx, "recall", result);
 }
 
 // ---------- invalidate ----------
@@ -295,11 +350,12 @@ export async function invalidateCtx(
       warnings.push(`mirror "${mirror.id}" failed: ${String(e)}`);
     }
   }
-  return {
+  const result = {
     ok: true as const,
     removed,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+  return postprocessResults(ctx, "invalidate", result);
 }
 
 // ---------- root-based entry points (default registry, for tests/tools) ----------
@@ -321,5 +377,5 @@ export async function invalidate(root: string, name: string | undefined, confirm
 
 export async function statusForRoot(root: string) {
   const registry = await getRegistry(root);
-  return computeStatus({ root, db: registry.primaryDb, staleness: registry.staleness, ignoreComments: registry.ignoreComments });
+  return statusCtx({ root, registry });
 }

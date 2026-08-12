@@ -1,7 +1,13 @@
 import type { Entry, EntryKind, EntryStatus, Manifest, StalenessPolicy } from "./types.js";
 import type { z } from "zod";
 
-export type PluginType = "datasource" | "database" | "format" | "filter";
+export type PluginType =
+  | "datasource"
+  | "database"
+  | "format"
+  | "filter"
+  | "postprocessing"
+  | "debugging";
 
 export interface PluginConfig {
   id: string;
@@ -90,6 +96,46 @@ export interface FilterPlugin extends BasePlugin {
   type: "filter";
   /** Chain: output of one filter is the input of the next, in priority order. */
   filter(query: RecallQuery, candidates: RecallCandidate[]): Promise<RecallCandidate[]>;
+}
+
+/** The service operations whose results can be post-processed. */
+export type PostprocessOperation = "status" | "recall" | "update" | "invalidate";
+
+/**
+ * Post-processing: runs on an operation's result right before it is returned
+ * to the agent, so it can give the agent extra guidance (e.g. whether to
+ * update/consolidate memories). Plugins chain in priority order; each receives
+ * the output of the previous one.
+ */
+export interface PostprocessPlugin extends BasePlugin {
+  type: "postprocessing";
+  /**
+   * Called with the result of an operation. Return a replacement value
+   * (e.g. `{ ...result, extra: ... }`) or `undefined` to keep it unchanged.
+   */
+  postprocess(
+    operation: PostprocessOperation,
+    result: unknown,
+  ): Promise<unknown | void> | unknown | void;
+}
+
+/** A memory lookup performed by an agent via memoize_recall. */
+export interface MemoryAccessEvent {
+  /** MCP client that performed the recall (clientInfo.name). */
+  accessor: string;
+  /** The requested topic, when the recall was topic-scoped. */
+  topic?: string;
+  /** What was looked up. "missing" when the topic names no entry. */
+  entries: { name: string; status: EntryStatus | "missing" }[];
+}
+
+/** Observability: see how memories are created and how agents access them. */
+export interface DebuggingPlugin extends BasePlugin {
+  type: "debugging";
+  /** Called after a memory entry is created or refreshed. Best-effort: failures are logged, not fatal. */
+  onMemoryCreated?(entry: Entry, operation: "create" | "refresh", accessor: string): Promise<void> | void;
+  /** Called when an agent recalls memories. Best-effort: failures are logged, not fatal. */
+  onMemoryAccessed?(access: MemoryAccessEvent): Promise<void> | void;
 }
 
 export interface UpdateArgs {

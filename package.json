@@ -4,6 +4,18 @@
   "description": "Shared project-memory MCP server for AI coding agents (Claude Code, Codex, ...)",
   "license": "MIT",
   "type": "module",
+  "main": "dist/exports.js",
+  "types": "dist/exports.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/exports.d.ts",
+      "default": "./dist/exports.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "agent-memoize": "dist/index.js"
   },
@@ -14,7 +26,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build -w @naevic/agent-memoize-plugin-dreaming -w @naevic/agent-memoize-plugin-dashboard",
     "pretest": "npm run build",
     "test": "vitest run",
     "prepublishOnly": "npm run test"

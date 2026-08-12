@@ -4,8 +4,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { computeStatus } from "./status.js";
-import { invalidateCtx, recallCtx, statusContext, updateEntryCtx, type ServiceContext } from "./service.js";
+import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx, type ServiceContext } from "./service.js";
 import { Registry } from "./plugins/registry.js";
 
 const { version: VERSION } = createRequire(import.meta.url)("../package.json") as {
@@ -103,7 +102,7 @@ server.registerTool(
   },
   async () => {
     try {
-      return ok(await computeStatus(statusContext(ctx)));
+      return ok(await statusCtx(ctx));
     } catch (e) {
       return fail(e);
     }
@@ -124,7 +123,8 @@ server.registerTool(
   },
   async ({ topic }) => {
     try {
-      return ok(await recallCtx(ctx, topic));
+      const accessor = server.server.getClientVersion()?.name ?? "unknown";
+      return ok(await recallCtx({ ...ctx, accessor }, topic));
     } catch (e) {
       return fail(e);
     }
@@ -156,7 +156,7 @@ server.registerTool(
   async (args) => {
     try {
       const author = args.author ?? server.server.getClientVersion()?.name ?? "unknown";
-      return ok(await updateEntryCtx(ctx, { ...args, author }));
+      return ok(await updateEntryCtx({ ...ctx, accessor: author }, { ...args, author }));
     } catch (e) {
       return fail(e);
     }

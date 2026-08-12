@@ -495,4 +495,22 @@ describe("dynamic import of external plugins", () => {
     const r = await Registry.create({ root: dir });
     expect(r.primaryDb.id).toBe("agent-memoize-memory-db");
   });
+
+  it("passes options to a plugin loaded by absolute path", async () => {
+    const dir = await tmpDir();
+    let seen: unknown;
+    const mod = path.join(dir, "opt-plugin.mjs");
+    await fs.writeFile(
+      mod,
+      "export const plugin = { id: \"opt-plugin\", version: \"1\", type: \"filter\", async init(ctx) { seen = ctx.options; }, async filter(_q, c) { return c; } };",
+    );
+    await writeConfig(dir, [{ id: mod, priority: 100, options: { threshold: 7 } }]);
+    const r = await Registry.create({ root: dir, load: async (id) => {
+      if (builtinById[id]) return builtinById[id];
+      const m = (await import(id)) as { plugin: any };
+      return { ...m.plugin, init: async (ctx: any) => { seen = ctx.options; } };
+    } });
+    expect(seen).toEqual({ threshold: 7 });
+    expect(r.filters[0].id).toBe("opt-plugin");
+  });
 });
