@@ -29,8 +29,11 @@ Usage: agent-memoize [--root <dir>] [--plugins <json>]
 Options:
   --root <dir>       Project root containing (or to contain) .agent-memoize/
                      Default: MEMOIZE_ROOT env var, else the current directory.
-  --plugins <json>   Override .agent-memoize/config.json plugins, e.g.
-                     [{ "id": "files" }, ...]
+  --plugins <json>   Override .agent-memoize/config.json plugins, keyed by
+                     plugin category, e.g. { "ledgers": [{ "id":
+                     "@naevic/agent-memoize/file-ledger" }] }
+                     (categories: producers, writers, ledgers, filters,
+                     organizers, observers)
   --inject           Inject the agent-workflow prompt and exit:
                      --inject                     current project (AGENTS.md and
                                                   CLAUDE.md, created if missing)
@@ -45,7 +48,7 @@ Options:
   -v, --version      Show version.
 
 Env:
-  MEMOIZE_PLUGINS      JSON array of plugins (same shape as --plugins).
+  MEMOIZE_PLUGINS      JSON plugins config keyed by category (same shape as --plugins).
   MEMOIZE_STALENESS    strict | claims | cosmetic-only.
 `;
 }
@@ -150,15 +153,15 @@ const fail = (e: unknown) => ({
   isError: true as const,
 });
 
-const primaryFormat = registry.formats[0];
+const primaryFormat = registry.writers[0];
 const promptSections: string[] = [];
 if (primaryFormat?.prompt) {
   promptSections.push(`## Memory format (${primaryFormat.id})\n${primaryFormat.prompt}`);
 }
-for (const f of registry.formats.slice(1)) {
+for (const f of registry.writers.slice(1)) {
   if (f.prompt) promptSections.push(`## Format annotation (${f.id})\n${f.prompt}`);
 }
-for (const ds of registry.datasources) {
+for (const ds of registry.producers) {
   const t = ds.describeUpdate?.();
   if (t) promptSections.push(`## Data source (${ds.id})\n${t}`);
 }

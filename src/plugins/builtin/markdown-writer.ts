@@ -1,9 +1,9 @@
-import type { FormatPlugin } from "../../plugin.js";
+import type { WriterPlugin } from "../../plugin.js";
 
-export const plugin: FormatPlugin = {
-  id: "markdown",
+export const plugin: WriterPlugin = {
+  id: "@naevic/agent-memoize/markdown-writer",
   version: "1.0.0",
-  type: "format",
+  type: "writer",
   prompt:
     "Write the entry body as free-form Markdown: plain prose, short sections, " +
     "code snippets where useful. The first line becomes the index summary when " +

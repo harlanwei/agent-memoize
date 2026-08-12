@@ -10,64 +10,101 @@ import {
   walkTree,
 } from "./workspace.js";
 import { getRegistry, type Registry } from "./plugins/registry.js";
-import type { DebuggingPlugin, MemoryAccessEvent, PostprocessOperation, RecallCandidate, UpdateArgs } from "./plugin.js";
-import type { ClaimRegion, Entry, EntryStatus, FileFingerprint, Manifest } from "./types.js";
+import type { LedgerPlugin, MemoryAccessEvent, ObserverPlugin, OrganizerOperation, RecallCandidate, UpdateArgs } from "./plugin.js";
+import type { ClaimRegion, Entry, EntryStatus, FileFingerprint, Manifest, StaleEntry, StatusResult } from "./types.js";
 
-export { entryFilePath } from "./plugins/builtin/db-files.js";
+export { entryFilePath } from "./plugins/builtin/file-ledger.js";
 export { storePath };
 
 export interface ServiceContext {
   root: string;
   registry: Registry;
-  /** MCP client performing the operation (clientInfo.name); appears in debugging events. */
+  /** MCP client performing the operation (clientInfo.name); appears in observer events. */
   accessor?: string;
 }
 
 // ---------- plugin hooks ----------
 
-/** Post-processing chain: each plugin sees the previous one's output. */
-async function postprocessResults<T>(
+/** Organizer chain: each plugin sees the previous one's output. */
+async function organizeResults<T>(
   ctx: ServiceContext,
-  op: PostprocessOperation,
+  op: OrganizerOperation,
   result: T,
 ): Promise<T | (T & Record<string, unknown>)> {
   let out: unknown = result;
-  for (const p of ctx.registry.postprocessors) {
-    const r = await p.postprocess(op, out);
+  for (const p of ctx.registry.organizers) {
+    const r = await p.organize(op, out);
     if (r !== undefined) out = r;
   }
   return out as T | (T & Record<string, unknown>);
 }
 
-/** Debugging hooks are observational: a failing hook never breaks the operation. */
-async function notifyDebuggers(
+/** Observer hooks are observational: a failing hook never breaks the operation. */
+async function notifyObservers(
   ctx: ServiceContext,
-  fire: (p: DebuggingPlugin) => Promise<void> | void,
+  fire: (p: ObserverPlugin) => Promise<void> | void,
 ): Promise<void> {
-  for (const p of ctx.registry.debuggers) {
+  for (const p of ctx.registry.observers) {
     try {
       await fire(p);
     } catch (e) {
-      console.error(`[memoize] debugging plugin "${p.id}" failed: ${String(e)}`);
+      console.error(`[memoize] observer plugin "${p.id}" failed: ${String(e)}`);
     }
   }
 }
 
 // ---------- status ----------
 
-export function statusContext(ctx: ServiceContext): StatusContext {
+/** Cap for merged lists, matching the per-ledger cap in status.ts. */
+const STATUS_CAP = 50;
+
+function statusContextFor(ctx: ServiceContext, db: LedgerPlugin): StatusContext {
   return {
     root: ctx.root,
-    db: ctx.registry.primaryDb,
+    db,
     staleness: ctx.registry.staleness,
     ignoreComments: ctx.registry.ignoreComments,
   };
 }
 
-/** memoize_status: status result passed through the post-processing chain. */
+/** Merge per-ledger status results: union everything; stale if any ledger is stale. */
+function mergeStatus(results: StatusResult[]): StatusResult {
+  const first = results[0]!;
+  const union = (key: "changedFiles" | "addedFiles" | "deletedFiles" | "cosmeticChanges") =>
+    [...new Set(results.flatMap((r) => r[key]))].sort().slice(0, STATUS_CAP);
+  const unionNames = (key: "verifiedEntries" | "suspendedEntries" | "invalidEntries") =>
+    [...new Set(results.flatMap((r) => r[key]))].sort();
+  const stale = new Map<string, StaleEntry>();
+  for (const r of results) {
+    for (const entry of r.staleEntries) {
+      if (!stale.has(entry.name)) stale.set(entry.name, entry);
+    }
+  }
+  return {
+    state: results.some((r) => r.state === "stale")
+      ? "stale"
+      : results.every((r) => r.state === "empty")
+        ? "empty"
+        : "fresh",
+    mode: first.mode,
+    changedFiles: union("changedFiles"),
+    addedFiles: union("addedFiles"),
+    deletedFiles: union("deletedFiles"),
+    cosmeticChanges: union("cosmeticChanges"),
+    verifiedEntries: unionNames("verifiedEntries"),
+    suspendedEntries: unionNames("suspendedEntries"),
+    staleEntries: [...stale.values()],
+    invalidEntries: unionNames("invalidEntries"),
+    truncated: results.some((r) => r.truncated),
+  };
+}
+
+/** memoize_status: per-ledger staleness merged, then passed through the organizer chain. */
 export async function statusCtx(ctx: ServiceContext) {
-  const result = await computeStatus(statusContext(ctx));
-  return postprocessResults(ctx, "status", result);
+  const results = await Promise.all(
+    ctx.registry.ledgers.map((db) => computeStatus(statusContextFor(ctx, db))),
+  );
+  return organizeResults(ctx, "status", mergeStatus(results));
 }
 
 // ---------- update ----------
@@ -84,11 +121,11 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
   const { root, registry } = ctx;
 
   let current: UpdateArgs = { ...args };
-  for (const ds of registry.datasources) {
+  for (const ds of registry.producers) {
     if (!ds.processUpdate) continue;
     const r = await ds.processUpdate(current);
     if (r === null) {
-      throw new Error(`update rejected by data source "${ds.id}"`);
+      throw new Error(`update rejected by producer "${ds.id}"`);
     }
     current = r;
   }
@@ -138,15 +175,16 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
   };
 
   const warnings: string[] = [];
-  for (const ds of registry.datasources) {
+  for (const ds of registry.producers) {
     if (!ds.lintSources) continue;
     const w = await ds.lintSources(root, sources, matched);
     warnings.push(...w);
   }
 
   await fs.mkdir(storePath(root), { recursive: true });
-  let updatedManifest: Manifest = { version: 1, entries: {} };
   const existed = (await registry.primaryDb.readEntry(name)) !== null;
+  // Writes go to the first ledger of the first group only; porting memories
+  // to other ledgers is the organizer's job.
   await registry.primaryDb.withLock(async () => {
     await registry.primaryDb.writeEntry(entry);
     const m = await registry.primaryDb.loadManifest();
@@ -163,18 +201,7 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
       if (!onDisk.has(key)) delete m.entries[key];
     }
     await registry.primaryDb.saveManifest(m);
-    updatedManifest = m;
   });
-
-  // Mirror databases: best-effort fan-out; failures become warnings, not errors.
-  for (const mirror of registry.databases.slice(1)) {
-    try {
-      await mirror.writeEntry(entry);
-      await mirror.saveManifest(updatedManifest);
-    } catch (e) {
-      warnings.push(`mirror "${mirror.id}" failed: ${String(e)}`);
-    }
-  }
 
   const result = {
     ok: true as const,
@@ -185,68 +212,95 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
       : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
-  await notifyDebuggers(
+  await notifyObservers(
     ctx,
     (p) => p.onMemoryCreated?.(entry, existed ? "refresh" : "create", ctx.accessor ?? "unknown"),
   );
-  return postprocessResults(ctx, "update", result);
+  return organizeResults(ctx, "update", result);
 }
 
 // ---------- recall ----------
 
 export async function recallCtx(ctx: ServiceContext, topic?: string) {
   const { registry } = ctx;
-  const status = await computeStatus(statusContext(ctx));
-  if (status.state === "empty") return { state: "empty" as const, entries: [] };
-
-  const { entries } = await registry.primaryDb.listEntries();
-  const staleMap = new Map(status.staleEntries.map((s) => [s.name, s]));
-  const verifiedSet = new Set(status.verifiedEntries);
-  const suspendedSet = new Set(status.suspendedEntries);
-
-  let candidates: RecallCandidate[] = entries.map((e) => ({
-    entry: e,
-    status: (staleMap.has(e.name)
-      ? "stale"
-      : suspendedSet.has(e.name)
-        ? "suspended"
-        : verifiedSet.has(e.name)
-          ? "verified"
-          : "fresh") as EntryStatus,
-    changedSources: staleMap.get(e.name)?.changedSources ?? [],
-    brokenClaims: staleMap.get(e.name)?.brokenClaims,
-    annotations: {} as Record<string, unknown>,
-  }));
-
-  for (const f of registry.filters) {
-    candidates = (await f.filter({ topic }, candidates)) ?? candidates;
-  }
-
+  let sawEntries = false;
+  let firstState: StatusResult["state"] = "fresh";
+  const availableNames: string[] = [];
   let result: unknown;
-  let access: { topic?: string; entries: { name: string; status: EntryStatus | "missing" }[] };
+  let access: { topic?: string; entries: { name: string; status: EntryStatus | "missing" }[] } = {
+    entries: [],
+  };
 
-  if (!topic) {
-    access = { entries: candidates.map((c) => ({ name: c.entry.name, status: c.status })) };
-    result = {
-      state: status.state,
-      entries: candidates.map((c) => ({
-        name: c.entry.name,
-        kind: c.entry.kind,
-        summary: c.entry.summary,
-        author: c.entry.author,
-        updated: c.entry.updated,
-        stale: c.status !== "fresh" && c.status !== "verified",
-        status: c.status,
-        ...c.annotations,
-      })),
-    };
-  } else {
+  // Ledger groups are tried in order; within a group the ledgers are queried
+  // in parallel and merged by entry name — the front ledger wins on
+  // contradiction. If the group's candidates survive the filter chain, they
+  // are the truth; otherwise recall continues with the next group.
+  outer: for (const group of registry.ledgerGroups) {
+    const [statuses, lists] = await Promise.all([
+      Promise.all(group.map((db) => computeStatus(statusContextFor(ctx, db)))),
+      Promise.all(group.map((db) => db.listEntries())),
+    ]);
+    const status = mergeStatus(statuses);
+    const entries: Entry[] = [];
+    const seen = new Set<string>();
+    for (const list of lists) {
+      for (const e of list.entries) {
+        if (!seen.has(e.name)) {
+          seen.add(e.name);
+          entries.push(e);
+        }
+      }
+    }
+    if (entries.length === 0) continue;
+    sawEntries = true;
+    firstState = status.state;
+
+    const staleMap = new Map(status.staleEntries.map((s) => [s.name, s]));
+    const verifiedSet = new Set(status.verifiedEntries);
+    const suspendedSet = new Set(status.suspendedEntries);
+    let candidates: RecallCandidate[] = entries.map((e) => ({
+      entry: e,
+      status: (staleMap.has(e.name)
+        ? "stale"
+        : suspendedSet.has(e.name)
+          ? "suspended"
+          : verifiedSet.has(e.name)
+            ? "verified"
+            : "fresh") as EntryStatus,
+      changedSources: staleMap.get(e.name)?.changedSources ?? [],
+      brokenClaims: staleMap.get(e.name)?.brokenClaims,
+      annotations: {} as Record<string, unknown>,
+    }));
+    for (const f of registry.filters) {
+      candidates = (await f.filter({ topic }, candidates)) ?? candidates;
+    }
+    for (const c of candidates) {
+      if (!availableNames.includes(c.entry.name)) availableNames.push(c.entry.name);
+    }
+
+    if (!topic) {
+      if (candidates.length === 0) continue;
+      access = { entries: candidates.map((c) => ({ name: c.entry.name, status: c.status })) };
+      result = {
+        state: status.state,
+        entries: candidates.map((c) => ({
+          name: c.entry.name,
+          kind: c.entry.kind,
+          summary: c.entry.summary,
+          author: c.entry.author,
+          updated: c.entry.updated,
+          stale: c.status !== "fresh" && c.status !== "verified",
+          status: c.status,
+          ...c.annotations,
+        })),
+      };
+      break outer;
+    }
+
     const c = candidates.find((c) => c.entry.name === topic);
-    if (!c) {
-      access = { topic, entries: [{ name: topic, status: "missing" }] };
-      result = { error: `no entry "${topic}"`, available: candidates.map((c) => c.entry.name) };
-    } else if (c.status === "stale") {
-      access = { topic, entries: [{ name: topic, status: c.status }] };
+    if (!c) continue;
+    access = { topic, entries: [{ name: topic, status: c.status }] };
+    if (c.status === "stale") {
       result = {
         name: topic,
         stale: true as const,
@@ -260,7 +314,6 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         ...c.annotations,
       };
     } else if (c.status === "suspended") {
-      access = { topic, entries: [{ name: topic, status: c.status }] };
       result = {
         name: topic,
         stale: true as const,
@@ -270,13 +323,12 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         ...c.annotations,
       };
     } else {
-      access = { topic, entries: [{ name: topic, status: c.status }] };
       const formatAnnotations: Record<string, unknown> = {};
       let rendered: unknown;
-      for (const f of registry.formats) {
+      for (const f of registry.writers) {
         const r = f.render?.(c.entry);
         if (r === undefined || r === null) continue;
-        if (f === registry.formats[0]) rendered = r;
+        if (f === registry.writers[0]) rendered = r;
         else formatAnnotations[f.id] = r;
       }
       const content = typeof rendered === "string" ? rendered : c.entry.content;
@@ -293,11 +345,24 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         ...c.annotations,
       };
     }
+    break outer;
+  }
+
+  if (!sawEntries) return { state: "empty" as const, entries: [] };
+  if (result === undefined) {
+    // Every group was tried without finding the requested info.
+    if (topic) {
+      access = { topic, entries: [{ name: topic, status: "missing" }] };
+      result = { error: `no entry "${topic}"`, available: availableNames };
+    } else {
+      access = { entries: [] };
+      result = { state: firstState, entries: [] };
+    }
   }
 
   const event: MemoryAccessEvent = { accessor: ctx.accessor ?? "unknown", ...access };
-  await notifyDebuggers(ctx, (p) => p.onMemoryAccessed?.(event));
-  return postprocessResults(ctx, "recall", result);
+  await notifyObservers(ctx, (p) => p.onMemoryAccessed?.(event));
+  return organizeResults(ctx, "recall", result);
 }
 
 // ---------- invalidate ----------
@@ -326,7 +391,7 @@ export async function invalidateCtx(
   }
 
   const removed: string[] = [];
-  const warnings: string[] = [];
+  // Deletes go to the first ledger of the first group only.
   await registry.primaryDb.withLock(async () => {
     if (name) {
       if (await registry.primaryDb.deleteEntry(name)) removed.push(name);
@@ -340,27 +405,7 @@ export async function invalidateCtx(
       await registry.primaryDb.saveManifest({ version: 1, entries: {} });
     }
   });
-  for (const mirror of registry.databases.slice(1)) {
-    try {
-      if (name) {
-        await mirror.deleteEntry(name);
-        const m = await mirror.loadManifest();
-        delete m.entries[name];
-        await mirror.saveManifest(m);
-      } else {
-        for (const e of entries) await mirror.deleteEntry(e.name);
-        await mirror.saveManifest({ version: 1, entries: {} });
-      }
-    } catch (e) {
-      warnings.push(`mirror "${mirror.id}" failed: ${String(e)}`);
-    }
-  }
-  const result = {
-    ok: true as const,
-    removed,
-    ...(warnings.length > 0 ? { warnings } : {}),
-  };
-  return postprocessResults(ctx, "invalidate", result);
+  return organizeResults(ctx, "invalidate", { ok: true as const, removed });
 }
 
 // ---------- root-based entry points (default registry, for tests/tools) ----------

@@ -5,24 +5,25 @@
  */
 export type {
   BasePlugin,
-  DataSourcePlugin,
-  DatabasePlugin,
-  DebuggingPlugin,
   FilterPlugin,
-  FormatPlugin,
-  PostprocessPlugin,
+  LedgerPlugin,
+  ObserverPlugin,
+  OrganizerPlugin,
   PluginConfig,
+  PluginConfigGroup,
   PluginContext,
   PluginRegistryConfig,
-  PostprocessOperation,
+  OrganizerOperation,
   MemoryAccessEvent,
+  ProducerPlugin,
   RecallCandidate,
   RecallQuery,
   ToolHandler,
   ToolRegistration,
   UpdateArgs,
+  WriterPlugin,
 } from "./plugin.js";
 export type { Entry, EntryBaseline, EntryKind, EntryMeta, EntryStatus, FileFingerprint, Manifest, StalenessPolicy, StatusResult } from "./types.js";
 
 export { STORE_DIR, storePath } from "./workspace.js";
-export { entryFilePath, emptyManifest, parseEntry, serializeEntry } from "./plugins/builtin/db-files.js";
+export { entryFilePath, emptyManifest, parseEntry, serializeEntry } from "./plugins/builtin/file-ledger.js";

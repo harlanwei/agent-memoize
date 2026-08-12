@@ -8,7 +8,7 @@ import type { FilterPlugin } from "../../plugin.js";
  * an LLM verifier that flips status from stale to verified listed after it).
  */
 export const plugin: FilterPlugin = {
-  id: "core-filter",
+  id: "@naevic/agent-memoize/stale-filter",
   version: "1.0.0",
   type: "filter",
   async filter(_query, candidates) {

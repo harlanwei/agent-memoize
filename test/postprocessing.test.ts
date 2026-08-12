@@ -5,24 +5,25 @@ import { Registry } from "../src/plugins/registry.js";
 import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx } from "../src/service.js";
 import type { ServiceContext } from "../src/service.js";
 import { tmpDir, write } from "./helpers.js";
-import { plugin as filesDb } from "../src/plugins/builtin/db-files.js";
-import { plugin as markdownFmt } from "../src/plugins/builtin/format-markdown.js";
-import { plugin as coreFilter } from "../src/plugins/builtin/filter-core.js";
-import { plugin as agentDs } from "../src/plugins/builtin/datasource-agent.js";
-import { plugin as dreaming } from "../packages/agent-memoize-plugin-dreaming/src/index.js";
+import { plugin as filesDb } from "../src/plugins/builtin/file-ledger.js";
+import { plugin as markdownFmt } from "../src/plugins/builtin/markdown-writer.js";
+import { plugin as stalenessFilter } from "../src/plugins/builtin/stale-filter.js";
+import { plugin as agentDs } from "../src/plugins/builtin/agent-producer.js";
+import { plugin as dreaming } from "../src/plugins/builtin/dream-organizer.js";
 import {
   logs as dashboardLogs,
   plugin as dashboard,
   url as dashboardUrl,
-} from "../packages/agent-memoize-plugin-dashboard/src/index.js";
+} from "../packages/agent-memoize-plugin-log-observer/src/index.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const builtinById: Record<string, any> = {
-  files: filesDb,
-  markdown: markdownFmt,
-  "core-filter": coreFilter,
-  agent: agentDs,
+  "@naevic/agent-memoize/file-ledger": filesDb,
+  "@naevic/agent-memoize/markdown-writer": markdownFmt,
+  "@naevic/agent-memoize/stale-filter": stalenessFilter,
+  "@naevic/agent-memoize/agent-producer": agentDs,
+  "@naevic/agent-memoize/dream-organizer": dreaming,
 };
 
 function loaderFor(plugins: any[]): any {
@@ -34,7 +35,7 @@ function loaderFor(plugins: any[]): any {
   };
 }
 
-async function writeConfig(root: string, plugins: unknown[], staleness = "strict") {
+async function writeConfig(root: string, plugins: unknown, staleness = "strict") {
   await write(
     root,
     ".agent-memoize/config.json",
@@ -42,12 +43,13 @@ async function writeConfig(root: string, plugins: unknown[], staleness = "strict
   );
 }
 
-const defaultPlugins = [
-  { id: "files" },
-  { id: "markdown" },
-  { id: "core-filter" },
-  { id: "agent" },
-];
+const defaultPlugins = {
+  producers: [{ id: "@naevic/agent-memoize/agent-producer" }],
+  writers: [{ id: "@naevic/agent-memoize/markdown-writer" }],
+  ledgers: [[{ id: "@naevic/agent-memoize/file-ledger" }]],
+  filters: [{ id: "@naevic/agent-memoize/stale-filter" }],
+  organizers: [{ id: "@naevic/agent-memoize/dream-organizer" }],
+};
 
 function ctxFor(registry: Registry, root: string): ServiceContext {
   return { root, registry };
@@ -55,13 +57,16 @@ function ctxFor(registry: Registry, root: string): ServiceContext {
 
 async function makeRegistry(
   root: string,
-  extras: any[],
-  opts?: { staleness?: string; plugins?: unknown[] },
+  extras: Record<string, unknown[]>,
+  opts?: { staleness?: string; plugins?: unknown },
 ): Promise<Registry> {
   const cfg =
-    opts?.plugins ?? [...defaultPlugins, ...extras.map((p) => ({ id: p.id }))];
-  await writeConfig(root, cfg as unknown[], opts?.staleness ?? "strict");
-  return Registry.create({ root, load: loaderFor(extras) });
+    opts?.plugins ?? {
+      ...defaultPlugins,
+      ...extras,
+    };
+  await writeConfig(root, cfg, opts?.staleness ?? "strict");
+  return Registry.create({ root, load: loaderFor(Object.values(extras).flat()) });
 }
 
 afterEach(async () => {
@@ -69,7 +74,7 @@ afterEach(async () => {
   delete process.env.MEMOIZE_STALENESS;
 });
 
-describe("postprocessing plugin type", () => {
+describe("organizer plugin type", () => {
   it("runs in config order and annotates the status result", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
@@ -77,22 +82,21 @@ describe("postprocessing plugin type", () => {
     const mk = (id: string, tag: string) => ({
       id,
       version: "1",
-      type: "postprocessing",
-      async postprocess(op: string, result: any) {
+      type: "organizer",
+      async organize(op: string, result: any) {
         order.push(id);
         return { ...result, [tag]: `${op}:${id}` };
       },
     });
-    await writeConfig(dir, [
+    await writeConfig(dir, {
       ...defaultPlugins,
-      { id: "pp-high" },
-      { id: "pp-low" },
-    ]);
+      organizers: [{ id: "pp-high" }, { id: "pp-low" }],
+    });
     const r = await Registry.create({
       root: dir,
       load: loaderFor([mk("pp-high", "high"), mk("pp-low", "low")]),
     });
-    expect(r.postprocessors.map((p) => p.id)).toEqual(["pp-high", "pp-low"]);
+    expect(r.organizers.map((p) => p.id)).toEqual(["pp-high", "pp-low"]);
     await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "file",
@@ -114,13 +118,13 @@ describe("postprocessing plugin type", () => {
     const mk = (id: string, tag: string) => ({
       id,
       version: "1",
-      type: "postprocessing",
-      async postprocess(_op: string, result: any) {
+      type: "organizer",
+      async organize(_op: string, result: any) {
         seen.push(`${id}:${result[tag]}`);
         return { ...result, [tag]: id };
       },
     });
-    const r = await makeRegistry(dir, [mk("a", "ok"), mk("b", "ok")]);
+    const r = await makeRegistry(dir, { organizers: [mk("a", "ok"), mk("b", "ok")] });
     await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "file",
@@ -136,12 +140,12 @@ describe("postprocessing plugin type", () => {
     const replacer = {
       id: "replacer",
       version: "1",
-      type: "postprocessing",
-      async postprocess() {
+      type: "organizer",
+      async organize() {
         return { replaced: true };
       },
     };
-    const r = await makeRegistry(dir, [replacer]);
+    const r = await makeRegistry(dir, { organizers: [replacer] });
     await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "decision",
@@ -152,20 +156,20 @@ describe("postprocessing plugin type", () => {
     expect(rec).toEqual({ replaced: true });
   });
 
-  it("postprocesses update and invalidate results too", async () => {
+  it("organizes update and invalidate results too", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
     const tags: string[] = [];
     const annotate = {
       id: "annotate",
       version: "1",
-      type: "postprocessing",
-      async postprocess(op: string, result: any) {
+      type: "organizer",
+      async organize(op: string, result: any) {
         tags.push(op);
         return { ...result, note: op };
       },
     };
-    const r = await makeRegistry(dir, [annotate]);
+    const r = await makeRegistry(dir, { organizers: [annotate] });
     const upd = (await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "file",
@@ -184,10 +188,10 @@ describe("postprocessing plugin type", () => {
     const inert = {
       id: "inert",
       version: "1",
-      type: "postprocessing",
-      async postprocess() {},
+      type: "organizer",
+      async organize() {},
     };
-    const r = await makeRegistry(dir, [inert]);
+    const r = await makeRegistry(dir, { organizers: [inert] });
     await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "decision",
@@ -204,7 +208,7 @@ describe("dreaming plugin", () => {
   it("stays quiet below the threshold (default 15)", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, [dreaming]);
+    const r = await makeRegistry(dir, { organizers: [dreaming] });
     const ctx = ctxFor(r, dir);
     await updateEntryCtx(ctx, {
       name: "m1",
@@ -231,11 +235,11 @@ describe("dreaming plugin", () => {
   it("annotates status with a dreaming plan once stale memories reach the threshold", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, [dreaming], {
-      plugins: [
+    const r = await makeRegistry(dir, { organizers: [dreaming] }, {
+      plugins: {
         ...defaultPlugins,
-        { id: "dreaming", options: { threshold: 2 } },
-      ],
+        organizers: [{ id: "@naevic/agent-memoize/dream-organizer", options: { threshold: 2 } }],
+      },
     });
     for (const n of ["m1", "m2"]) {
       await updateEntryCtx(ctxFor(r, dir), {
@@ -260,11 +264,11 @@ describe("dreaming plugin", () => {
   it("counts suspended memories and leaves other operations untouched", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, [dreaming], {
-      plugins: [
+    const r = await makeRegistry(dir, { organizers: [dreaming] }, {
+      plugins: {
         ...defaultPlugins,
-        { id: "dreaming", options: { threshold: 1 } },
-      ],
+        organizers: [{ id: "@naevic/agent-memoize/dream-organizer", options: { threshold: 1 } }],
+      },
     });
     const ctx = ctxFor(r, dir);
     await updateEntryCtx(ctx, {
@@ -292,7 +296,7 @@ describe("dreaming plugin", () => {
   });
 });
 
-describe("debugging plugin type", () => {
+describe("observer plugin type", () => {
   it("fires onMemoryCreated with create vs refresh", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
@@ -300,12 +304,12 @@ describe("debugging plugin type", () => {
     const watcher = {
       id: "watcher",
       version: "1",
-      type: "debugging",
+      type: "observer",
       async onMemoryCreated(entry: any, op: string, accessor: string) {
         events.push({ entry, op, accessor });
       },
     };
-    const r = await makeRegistry(dir, [watcher]);
+    const r = await makeRegistry(dir, { observers: [watcher] });
     const ctx = ctxFor(r, dir);
     await updateEntryCtx(ctx, { name: "m", kind: "file", sources: ["a.txt"], content: "v1", author: "t" });
     await updateEntryCtx(
@@ -325,12 +329,12 @@ describe("debugging plugin type", () => {
     const watcher = {
       id: "watcher",
       version: "1",
-      type: "debugging",
+      type: "observer",
       async onMemoryAccessed(access: any) {
         accesses.push(access);
       },
     };
-    const r = await makeRegistry(dir, [watcher]);
+    const r = await makeRegistry(dir, { observers: [watcher] });
     const ctx = ctxFor(r, dir);
     await updateEntryCtx(ctx, { name: "m", kind: "file", sources: ["a.txt"], content: "v", author: "t" });
 
@@ -348,17 +352,17 @@ describe("debugging plugin type", () => {
     ]);
   });
 
-  it("a failing debugging hook never breaks the operation", async () => {
+  it("a failing observer hook never breaks the operation", async () => {
     const dir = await tmpDir();
     const broken = {
       id: "broken",
       version: "1",
-      type: "debugging",
+      type: "observer",
       async onMemoryCreated() {
         throw new Error("boom");
       },
     };
-    const r = await makeRegistry(dir, [broken]);
+    const r = await makeRegistry(dir, { observers: [broken] });
     const res = (await updateEntryCtx(ctxFor(r, dir), {
       name: "m",
       kind: "decision",
@@ -379,11 +383,11 @@ describe("dashboard plugin", () => {
   it("logs memory creation and access, and serves them over HTTP", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, [dashboard], {
-      plugins: [
+    const r = await makeRegistry(dir, { observers: [dashboard] }, {
+      plugins: {
         ...defaultPlugins,
-        { id: "dashboard", options: { port: 0, maxLogs: 10 } },
-      ],
+        observers: [{ id: "dashboard", options: { port: 0, maxLogs: 10 } }],
+      },
     });
     const ctx = ctxFor(r, dir);
     const base = dashboardUrl();
@@ -435,11 +439,11 @@ describe("dashboard plugin", () => {
       ].join("\n"),
     );
 
-    const r = await makeRegistry(dir, [dashboard], {
-      plugins: [
+    const r = await makeRegistry(dir, { observers: [dashboard] }, {
+      plugins: {
         ...defaultPlugins,
-        { id: "dashboard", options: { port: 0 } },
-      ],
+        observers: [{ id: "dashboard", options: { port: 0 } }],
+      },
     });
     const base = dashboardUrl();
 
@@ -465,11 +469,11 @@ describe("dashboard plugin", () => {
   it("picks up records appended to the JSONL by another process", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, [dashboard], {
-      plugins: [
+    const r = await makeRegistry(dir, { observers: [dashboard] }, {
+      plugins: {
         ...defaultPlugins,
-        { id: "dashboard", options: { port: 0 } },
-      ],
+        observers: [{ id: "dashboard", options: { port: 0 } }],
+      },
     });
     const base = dashboardUrl();
     expect(await apiEmpty(base)).toBe(true);
@@ -496,15 +500,15 @@ describe("dashboard plugin", () => {
   it("sibling instance: shares the port, logs anyway, and the running dashboard shows it", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const mkConfig = (port: number) => [
+    const mkConfig = (port: number) => ({
       ...defaultPlugins,
-      { id: "dashboard", options: { port } },
-    ];
-    const rA = await makeRegistry(dir, [dashboard], { plugins: mkConfig(0) });
+      observers: [{ id: "dashboard", options: { port } }],
+    });
+    const rA = await makeRegistry(dir, { observers: [dashboard] }, { plugins: mkConfig(0) });
     const baseA = dashboardUrl();
     const portA = Number(new URL(baseA).port);
 
-    const rB = await makeRegistry(dir, [dashboard], { plugins: mkConfig(portA) });
+    const rB = await makeRegistry(dir, { observers: [dashboard] }, { plugins: mkConfig(portA) });
     expect(dashboardUrl()).toBe(baseA); // no second HTTP instance
 
     await updateEntryCtx(

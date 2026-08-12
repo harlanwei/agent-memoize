@@ -2,21 +2,38 @@ import type { Entry, EntryKind, EntryStatus, Manifest, StalenessPolicy } from ".
 import type { z } from "zod";
 
 export type PluginType =
-  | "datasource"
-  | "database"
-  | "format"
+  | "producer"
+  | "ledger"
+  | "writer"
   | "filter"
-  | "postprocessing"
-  | "debugging";
+  | "organizer"
+  | "observer";
 
 export interface PluginConfig {
   id: string;
   options?: Record<string, unknown>;
 }
 
+/**
+ * The `plugins` field of config.json: one list of configs per category.
+ * Keys are plural; `ledgers` is a list of ledger groups — a bare config is a
+ * one-ledger group, an array of configs is a group queried together.
+ */
+export interface PluginConfigGroup {
+  producers?: PluginConfig[];
+  writers?: PluginConfig[];
+  ledgers?: (PluginConfig | PluginConfig[])[];
+  filters?: PluginConfig[];
+  organizers?: PluginConfig[];
+  observers?: PluginConfig[];
+}
+
+/** A group of ledgers queried together; the front ledger wins on contradiction. */
+export type LedgerGroup = LedgerPlugin[];
+
 export interface PluginRegistryConfig {
   version: 1;
-  plugins: PluginConfig[];
+  plugins: PluginConfigGroup;
   staleness?: StalenessPolicy;
   ignoreComments?: boolean;
 }
@@ -43,8 +60,8 @@ export interface PluginContext {
     description?: string,
   ): void;
   log(level: "debug" | "info" | "warn" | "error", msg: string): void;
-  /** Resolved primary database, set before any non-database plugin initializes. */
-  db: DatabasePlugin;
+  /** Resolved primary ledger, set before any non-ledger plugin initializes. */
+  db: LedgerPlugin;
 }
 
 export interface BasePlugin {
@@ -57,8 +74,8 @@ export interface BasePlugin {
 }
 
 /** Produces and normalizes the raw input that becomes a memory. */
-export interface DataSourcePlugin extends BasePlugin {
-  type: "datasource";
+export interface ProducerPlugin extends BasePlugin {
+  type: "producer";
   /** Normalize/validate raw update input; return null to reject it. */
   processUpdate?(args: UpdateArgs): Promise<UpdateArgs | null>;
   /** Text appended to the memoize_update tool description. */
@@ -67,9 +84,9 @@ export interface DataSourcePlugin extends BasePlugin {
   lintSources?(root: string, sources: string[], matched: string[]): Promise<string[]> | string[];
 }
 
-/** Persists entries and baselines. First enabled database is primary, rest mirror writes. */
-export interface DatabasePlugin extends BasePlugin {
-  type: "database";
+/** Persists entries and baselines. Reads merge per ledger group (front ledger wins); writes target the first ledger. */
+export interface LedgerPlugin extends BasePlugin {
+  type: "ledger";
   listEntries(): Promise<{ entries: Entry[]; invalid: string[] }>;
   readEntry(name: string): Promise<Entry | null>;
   writeEntry(entry: Entry): Promise<void>;
@@ -80,11 +97,11 @@ export interface DatabasePlugin extends BasePlugin {
 }
 
 /** Defines the memory representation and the agent instruction that produces it. */
-export interface FormatPlugin extends BasePlugin {
-  type: "format";
+export interface WriterPlugin extends BasePlugin {
+  type: "writer";
   /** Agent instruction: how to process input data into this format. */
   prompt: string;
-  /** Optional output transform; the primary format may shape recall content. */
+  /** Optional output transform; the primary writer may shape recall content. */
   render?(entry: Entry): unknown;
   /** Optional canonicalization of content on write. */
   normalize?(content: string): string;
@@ -97,23 +114,23 @@ export interface FilterPlugin extends BasePlugin {
   filter(query: RecallQuery, candidates: RecallCandidate[]): Promise<RecallCandidate[]>;
 }
 
-/** The service operations whose results can be post-processed. */
-export type PostprocessOperation = "status" | "recall" | "update" | "invalidate";
+/** The service operations whose results can be organized. */
+export type OrganizerOperation = "status" | "recall" | "update" | "invalidate";
 
 /**
- * Post-processing: runs on an operation's result right before it is returned
+ * Organizer: runs on an operation's result right before it is returned
  * to the agent, so it can give the agent extra guidance (e.g. whether to
  * update/consolidate memories). Plugins chain in config order; each receives
  * the output of the previous one.
  */
-export interface PostprocessPlugin extends BasePlugin {
-  type: "postprocessing";
+export interface OrganizerPlugin extends BasePlugin {
+  type: "organizer";
   /**
    * Called with the result of an operation. Return a replacement value
    * (e.g. `{ ...result, extra: ... }`) or `undefined` to keep it unchanged.
    */
-  postprocess(
-    operation: PostprocessOperation,
+  organize(
+    operation: OrganizerOperation,
     result: unknown,
   ): Promise<unknown | void> | unknown | void;
 }
@@ -129,8 +146,8 @@ export interface MemoryAccessEvent {
 }
 
 /** Observability: see how memories are created and how agents access them. */
-export interface DebuggingPlugin extends BasePlugin {
-  type: "debugging";
+export interface ObserverPlugin extends BasePlugin {
+  type: "observer";
   /** Called after a memory entry is created or refreshed. Best-effort: failures are logged, not fatal. */
   onMemoryCreated?(entry: Entry, operation: "create" | "refresh", accessor: string): Promise<void> | void;
   /** Called when an agent recalls memories. Best-effort: failures are logged, not fatal. */

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { DebuggingPlugin, PluginContext } from "@naevic/agent-memoize";
+import type { ObserverPlugin, PluginContext } from "@naevic/agent-memoize";
 
 const DEFAULT_PORT = 8888;
 const DEFAULT_MAX_LOGS = 1000;
@@ -217,10 +217,10 @@ export function url(): string {
   return baseUrl;
 }
 
-export const plugin: DebuggingPlugin = {
+export const plugin: ObserverPlugin = {
   id: "dashboard",
   version: "1.0.0",
-  type: "debugging",
+  type: "observer",
 
   async init(ctx: PluginContext) {
     port = numOption(ctx.options.port, DEFAULT_PORT);

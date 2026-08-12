@@ -1,9 +1,9 @@
-import type { PluginContext, PostprocessPlugin } from "@naevic/agent-memoize";
+import type { OrganizerPlugin, PluginContext } from "../../plugin.js";
 
 const DEFAULT_THRESHOLD = 15;
 
 /**
- * Postprocessing plugin: when enough stale/suspended memories have accumulated
+ * Organizer plugin: when enough stale/suspended memories have accumulated
  * (configurable `threshold`, default 15), the memoize_status result is
  * annotated with a "dreaming" section telling the agent to spawn subagents
  * that verify each memory against its sources and reorganize them into a more
@@ -22,17 +22,17 @@ function namesOf(list: unknown): string[] {
   });
 }
 
-export const plugin: PostprocessPlugin = {
-  id: "dreaming",
+export const plugin: OrganizerPlugin = {
+  id: "@naevic/agent-memoize/dream-organizer",
   version: "1.0.0",
-  type: "postprocessing",
+  type: "organizer",
 
   async init(ctx: PluginContext) {
     const t = ctx.options.threshold;
     threshold = typeof t === "number" && Number.isFinite(t) && t > 0 ? t : DEFAULT_THRESHOLD;
   },
 
-  async postprocess(operation, result) {
+  async organize(operation, result) {
     if (operation !== "status") return;
     const s = result as { staleEntries?: unknown; suspendedEntries?: unknown };
     if (!Array.isArray(s?.staleEntries)) return;

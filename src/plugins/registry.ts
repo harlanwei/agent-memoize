@@ -3,51 +3,64 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   BasePlugin,
-  DataSourcePlugin,
-  DatabasePlugin,
-  DebuggingPlugin,
   FilterPlugin,
-  FormatPlugin,
+  LedgerGroup,
+  LedgerPlugin,
+  ObserverPlugin,
+  OrganizerPlugin,
   PluginConfig,
+  PluginConfigGroup,
   PluginContext,
   PluginType,
-  PostprocessPlugin,
+  ProducerPlugin,
   ToolRegistration,
+  WriterPlugin,
 } from "../plugin.js";
 import { storePath } from "../workspace.js";
 import type { StalenessPolicy } from "../types.js";
 
 export type {
   BasePlugin,
-  DataSourcePlugin,
-  DatabasePlugin,
-  DebuggingPlugin,
   FilterPlugin,
-  FormatPlugin,
-  PostprocessPlugin,
+  LedgerGroup,
+  LedgerPlugin,
+  ObserverPlugin,
+  OrganizerPlugin,
+  ProducerPlugin,
+  WriterPlugin,
 };
 export type {
   MemoryAccessEvent,
   PluginConfig,
+  PluginConfigGroup,
   PluginContext,
   PluginRegistryConfig,
-  PostprocessOperation,
+  OrganizerOperation,
   ToolRegistration,
 } from "../plugin.js";
 
 const BUILTIN_MODULES: Record<string, () => Promise<{ plugin: BasePlugin }>> = {
-  files: () => import("./builtin/db-files.js"),
-  markdown: () => import("./builtin/format-markdown.js"),
-  "core-filter": () => import("./builtin/filter-core.js"),
-  agent: () => import("./builtin/datasource-agent.js"),
+  "@naevic/agent-memoize/file-ledger": () => import("./builtin/file-ledger.js"),
+  "@naevic/agent-memoize/markdown-writer": () => import("./builtin/markdown-writer.js"),
+  "@naevic/agent-memoize/stale-filter": () => import("./builtin/stale-filter.js"),
+  "@naevic/agent-memoize/agent-producer": () => import("./builtin/agent-producer.js"),
+  "@naevic/agent-memoize/dream-organizer": () => import("./builtin/dream-organizer.js"),
 };
 
-const DEFAULT_PLUGINS: PluginConfig[] = [
-  { id: "files" },
-  { id: "markdown" },
-  { id: "core-filter" },
-  { id: "agent" },
-];
+/**
+ * Per-category default built-ins. A category the user does not configure
+ * falls back to its entry here; a configured category (even an empty array)
+ * is authoritative. The default pipeline — no config at all — is every
+ * category below.
+ */
+const DEFAULT_PLUGINS: PluginConfigGroup = {
+  ledgers: [{ id: "@naevic/agent-memoize/file-ledger" }],
+  producers: [{ id: "@naevic/agent-memoize/agent-producer" }],
+  writers: [{ id: "@naevic/agent-memoize/markdown-writer" }],
+  filters: [{ id: "@naevic/agent-memoize/stale-filter" }],
+  organizers: [{ id: "@naevic/agent-memoize/dream-organizer" }],
+  observers: [],
+};
 
 const RESERVED_TOOLS = new Set([
   "memoize_status",
@@ -62,7 +75,7 @@ export type PluginLoader = (id: string, options: Record<string, unknown>) => Pro
 
 export interface RegistryOptions {
   root: string;
-  /** --plugins CLI override (JSON array of PluginConfig). */
+  /** --plugins CLI override (JSON object keyed by plugin category). */
   cliPlugins?: string;
   /** Injected loader for tests. Defaults to builtins + dynamic import. */
   load?: PluginLoader;
@@ -72,16 +85,19 @@ export class Registry {
   readonly root: string;
   readonly staleness: StalenessPolicy;
   readonly ignoreComments: boolean;
-  datasources: DataSourcePlugin[] = [];
-  databases: DatabasePlugin[] = [];
-  formats: FormatPlugin[] = [];
+  producers: ProducerPlugin[] = [];
+  /** Ledger groups, in config order; ledgers within a group are queried in parallel. */
+  ledgerGroups: LedgerGroup[] = [];
+  ledgers: LedgerPlugin[] = [];
+  writers: WriterPlugin[] = [];
   filters: FilterPlugin[] = [];
-  postprocessors: PostprocessPlugin[] = [];
-  debuggers: DebuggingPlugin[] = [];
+  organizers: OrganizerPlugin[] = [];
+  observers: ObserverPlugin[] = [];
   tools: ToolRegistration[] = [];
-  primaryDb!: DatabasePlugin;
+  /** First ledger of the first group; the write target for update/invalidate. */
+  primaryDb!: LedgerPlugin;
 
-  /** Plugins in init order (databases first, config order within each type). */
+  /** Plugins in init order (ledgers first, config order within each category). */
   private readonly initOrder: BasePlugin[] = [];
 
   private constructor(root: string, staleness: StalenessPolicy, ignoreComments: boolean) {
@@ -92,61 +108,91 @@ export class Registry {
 
   static async create(opts: RegistryOptions): Promise<Registry> {
     const file = await readConfigFile(opts.root);
-    const plugins =
-      parsePluginList(opts.cliPlugins, process.env.MEMOIZE_PLUGINS) ??
-      file.plugins ??
-      DEFAULT_PLUGINS;
+    const configured =
+      parsePluginList(opts.cliPlugins, process.env.MEMOIZE_PLUGINS) ?? file.plugins ?? {};
     const staleness = parseStaleness(process.env.MEMOIZE_STALENESS) ?? file.staleness ?? "claims";
     const ignoreComments = file.ignoreComments ?? false;
-    validatePluginList(plugins);
+    validatePluginGroup(configured);
+    // A category the user did not configure falls back to its default
+    // built-in; a configured category runs exactly the listed plugins.
+    const plugins = withDefaultBuiltins(configured);
     const loader = opts.load ?? defaultLoader(opts.root);
     const registry = new Registry(opts.root, staleness, ignoreComments);
 
-    // Load every configured plugin (type comes from the plugin itself),
-    // then fill missing types with the defaults so behavior never degrades.
-    // Map iteration order is insertion order, so byType preserves config
-    // array position (configured plugins first, defaults appended after):
-    // within each category, if A is listed before B, A runs first.
+    // Load every plugin in category order (ledgers first, so init order is
+    // deterministic), checking that each plugin's declared type matches the
+    // category it is configured under. Ledgers keep their group structure;
+    // within each category (and within each group), config order is
+    // preserved: if A is listed before B, A runs first.
     const loaded = new Map<string, BasePlugin>();
     const cfgByPlugin = new Map<BasePlugin, PluginConfig>();
-    for (const cfg of plugins) {
+    const loadCfg = async (type: PluginType, cfg: PluginConfig): Promise<BasePlugin> => {
       const p = await loadOne(cfg.id, cfg.options ?? {}, loader);
+      if (p.type !== type) {
+        throw new Error(
+          `plugin "${cfg.id}" declares type "${p.type}" but is configured under "${type}"`,
+        );
+      }
       loaded.set(cfg.id, p);
       cfgByPlugin.set(p, cfg);
+      return p;
+    };
+
+    const ledgerGroups: LedgerPlugin[][] = [];
+    for (const entry of plugins.ledgers ?? []) {
+      const groupCfgs = Array.isArray(entry) ? entry : [entry];
+      const group: LedgerPlugin[] = [];
+      for (const cfg of groupCfgs) group.push((await loadCfg("ledger", cfg)) as LedgerPlugin);
+      ledgerGroups.push(group);
     }
-    for (const def of DEFAULT_PLUGINS) {
-      if (loaded.has(def.id)) continue;
-      const p = await loadOne(def.id, def.options ?? {}, loader);
-      loaded.set(def.id, p);
-      cfgByPlugin.set(p, def);
+    registry.ledgerGroups = ledgerGroups;
+    registry.ledgers = ledgerGroups.flat();
+    if (registry.ledgers.length === 0) {
+      throw new Error("no ledger plugin enabled (default: @naevic/agent-memoize/file-ledger)");
     }
-    const byType = new Map<PluginType, BasePlugin[]>();
-    for (const type of TYPES) byType.set(type, []);
-    for (const p of loaded.values()) byType.get(p.type)?.push(p);
-    for (const type of TYPES) {
-      const ordered = byType.get(type)!;
-      if (type === "database") {
-        registry.databases = ordered as DatabasePlugin[];
-        if (registry.databases.length === 0) {
-          throw new Error("no database plugin enabled (default: files)");
-        }
-        registry.primaryDb = registry.databases[0];
-      } else if (type === "datasource") registry.datasources = ordered as DataSourcePlugin[];
-      else if (type === "format") registry.formats = ordered as FormatPlugin[];
-      else if (type === "filter") registry.filters = ordered as FilterPlugin[];
-      else if (type === "postprocessing")
-        registry.postprocessors = ordered as PostprocessPlugin[];
-      else registry.debuggers = ordered as DebuggingPlugin[];
+    registry.primaryDb = registry.ledgers[0];
+
+    const producers: ProducerPlugin[] = [];
+    for (const cfg of plugins.producers ?? []) {
+      producers.push((await loadCfg("producer", cfg)) as ProducerPlugin);
+    }
+    registry.producers = producers;
+    const writers: WriterPlugin[] = [];
+    for (const cfg of plugins.writers ?? []) {
+      writers.push((await loadCfg("writer", cfg)) as WriterPlugin);
+    }
+    registry.writers = writers;
+    const filters: FilterPlugin[] = [];
+    for (const cfg of plugins.filters ?? []) {
+      filters.push((await loadCfg("filter", cfg)) as FilterPlugin);
+    }
+    registry.filters = filters;
+    const organizers: OrganizerPlugin[] = [];
+    for (const cfg of plugins.organizers ?? []) {
+      organizers.push((await loadCfg("organizer", cfg)) as OrganizerPlugin);
+    }
+    registry.organizers = organizers;
+    const observers: ObserverPlugin[] = [];
+    for (const cfg of plugins.observers ?? []) {
+      observers.push((await loadCfg("observer", cfg)) as ObserverPlugin);
+    }
+    registry.observers = observers;
+
+    if (registry.producers.length === 0) {
+      throw new Error("no producer plugin enabled (default: @naevic/agent-memoize/agent-producer)");
+    }
+    if (registry.writers.length === 0) {
+      throw new Error("no writer plugin enabled (default: @naevic/agent-memoize/markdown-writer)");
     }
 
-    // Databases init first so ctx.db is set before other plugins run.
+    // Ledgers init first so ctx.db is set before other plugins run.
     const ordered = [
-      ...registry.databases,
-      ...registry.datasources,
-      ...registry.formats,
+      ...registry.ledgers,
+      ...registry.producers,
+      ...registry.writers,
       ...registry.filters,
-      ...registry.postprocessors,
-      ...registry.debuggers,
+      ...registry.organizers,
+      ...registry.observers,
     ];
     registry.initOrder.push(...ordered);
     for (const plugin of ordered) {
@@ -190,8 +236,13 @@ export class Registry {
 
 // ---------- config loading ----------
 
+/** Config keys as documented (writers before ledgers); used in error messages. */
+const DOC_KEYS = ["producers", "writers", "ledgers", "filters", "organizers", "observers"];
+
+const PLUGINS_SHAPE = `an object keyed by plugin category (${DOC_KEYS.join(", ")})`;
+
 async function readConfigFile(root: string): Promise<{
-  plugins?: PluginConfig[];
+  plugins?: PluginConfigGroup;
   staleness?: StalenessPolicy;
   ignoreComments?: boolean;
 }> {
@@ -217,11 +268,18 @@ async function readConfigFile(root: string): Promise<{
     throw new Error(`unsupported config version: ${String(obj.version)}`);
   }
   const out: {
-    plugins?: PluginConfig[];
+    plugins?: PluginConfigGroup;
     staleness?: StalenessPolicy;
     ignoreComments?: boolean;
   } = {};
-  if (Array.isArray(obj.plugins)) out.plugins = obj.plugins as PluginConfig[];
+  if (obj.plugins !== undefined) {
+    if (typeof obj.plugins !== "object" || obj.plugins === null || Array.isArray(obj.plugins)) {
+      throw new Error(
+        `invalid .agent-memoize/config.json: plugins must be ${PLUGINS_SHAPE}`,
+      );
+    }
+    out.plugins = obj.plugins as PluginConfigGroup;
+  }
   if (typeof obj.staleness === "string") out.staleness = obj.staleness as StalenessPolicy;
   if (typeof obj.ignoreComments === "boolean") out.ignoreComments = obj.ignoreComments;
   return out;
@@ -230,17 +288,21 @@ async function readConfigFile(root: string): Promise<{
 function parsePluginList(
   cliPlugins: string | undefined,
   envPlugins: string | undefined,
-): PluginConfig[] | null {
+): PluginConfigGroup | null {
   const raw = cliPlugins ?? envPlugins;
   if (raw === undefined) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error("--plugins/MEMOIZE_PLUGINS must be a JSON array of { id, options? }");
+    throw new Error(
+      `--plugins/MEMOIZE_PLUGINS must be JSON of the form { "producer": [{ "id": "..." }], ... }`,
+    );
   }
-  if (!Array.isArray(parsed)) throw new Error("--plugins/MEMOIZE_PLUGINS must be a JSON array");
-  return parsed as PluginConfig[];
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`--plugins/MEMOIZE_PLUGINS must be ${PLUGINS_SHAPE}`);
+  }
+  return parsed as PluginConfigGroup;
 }
 
 function parseStaleness(v: string | undefined): StalenessPolicy | null {
@@ -251,9 +313,9 @@ function parseStaleness(v: string | undefined): StalenessPolicy | null {
   return v as StalenessPolicy;
 }
 
-function validatePluginList(plugins: PluginConfig[]): void {
+function validatePluginGroup(group: PluginConfigGroup): void {
   const seen = new Set<string>();
-  for (const cfg of plugins) {
+  const checkEntry = (cfg: PluginConfig): void => {
     if (
       typeof cfg !== "object" ||
       cfg === null ||
@@ -264,17 +326,60 @@ function validatePluginList(plugins: PluginConfig[]): void {
     }
     if (seen.has(cfg.id)) throw new Error(`duplicate plugin id: "${cfg.id}"`);
     seen.add(cfg.id);
+  };
+  for (const key of Object.keys(group)) {
+    if (!(DOC_KEYS as string[]).includes(key)) {
+      throw new Error(`unknown plugin category: "${key}"`);
+    }
+    const list = (group as Record<string, unknown>)[key];
+    if (!Array.isArray(list)) {
+      throw new Error(`plugin category "${key}" must be an array`);
+    }
+    if (key === "ledgers") {
+      // Each element is either a plugin entry (a one-ledger group) or a
+      // non-empty array of entries (a group queried together).
+      for (let i = 0; i < list.length; i++) {
+        const entry = list[i];
+        if (Array.isArray(entry)) {
+          if (entry.length === 0) throw new Error(`ledger group ${i} is empty`);
+          for (const cfg of entry) checkEntry(cfg as PluginConfig);
+        } else {
+          checkEntry(entry as PluginConfig);
+        }
+      }
+    } else {
+      for (const cfg of list) checkEntry(cfg as PluginConfig);
+    }
   }
 }
 
-/** Group configs by type; built-in ids are known, external ids classify after load. */
+/**
+ * Merge per category: an unconfigured category falls back to its default
+ * built-in (if any); a configured category — even an empty array — is
+ * authoritative.
+ */
+function withDefaultBuiltins(configured: PluginConfigGroup): PluginConfigGroup {
+  return {
+    producers: configured.producers ?? DEFAULT_PLUGINS.producers ?? [],
+    writers: configured.writers ?? DEFAULT_PLUGINS.writers ?? [],
+    ledgers: configured.ledgers ?? DEFAULT_PLUGINS.ledgers ?? [],
+    filters: configured.filters ?? DEFAULT_PLUGINS.filters ?? [],
+    organizers: configured.organizers ?? DEFAULT_PLUGINS.organizers ?? [],
+    observers: configured.observers ?? DEFAULT_PLUGINS.observers ?? [],
+  };
+}
+
+/**
+ * Runtime category order: ledgers init first so ctx.db is set before other
+ * plugins run; the remaining categories keep the documented relative order.
+ */
 const TYPES: PluginType[] = [
-  "datasource",
-  "database",
-  "format",
+  "ledger",
+  "producer",
+  "writer",
   "filter",
-  "postprocessing",
-  "debugging",
+  "organizer",
+  "observer",
 ];
 
 async function loadOne(
@@ -283,9 +388,8 @@ async function loadOne(
   loader: PluginLoader,
 ): Promise<BasePlugin> {
   const p = await loader(id, options);
-  const pathLike = id.startsWith("/") || id.startsWith("file:");
-  if (!pathLike && p.id !== id) {
-    throw new Error(`plugin "${id}" declares a different id: ${p.id}`);
+  if (!p || typeof p.id !== "string" || p.id === "") {
+    throw new Error(`plugin "${id}" does not declare an id`);
   }
   return p;
 }

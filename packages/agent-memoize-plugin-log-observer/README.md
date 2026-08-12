@@ -1,13 +1,13 @@
-# @naevic/agent-memoize-plugin-dashboard
+# @naevic/agent-memoize-plugin-log-observer
 
-Debugging plugin for [`agent-memoize`](https://www.npmjs.com/package/@naevic/agent-memoize):
+Observer plugin for [`agent-memoize`](https://www.npmjs.com/package/@naevic/agent-memoize):
 logs every memory creation/refresh (`memory.created`) and every recall access
 (`memory.accessed`), and serves an HTTP dashboard to inspect the logs.
 
 ## Install
 
 ```sh
-npm install -D @naevic/agent-memoize-plugin-dashboard
+npm install -D @naevic/agent-memoize-plugin-log-observer
 ```
 
 ## Configure
@@ -17,15 +17,21 @@ npm install -D @naevic/agent-memoize-plugin-dashboard
 ```json
 {
   "version": 1,
-  "plugins": [
-    { "id": "files" },
-    { "id": "markdown" },
-    { "id": "core-filter" },
-    { "id": "agent" },
-    { "id": "dashboard", "options": { "port": 8888 } }
-  ]
+  "plugins": {
+    "producers": [{ "id": "@naevic/agent-memoize/agent-producer" }],
+    "writers": [{ "id": "@naevic/agent-memoize/markdown-writer" }],
+    "ledgers": [{ "id": "@naevic/agent-memoize/file-ledger" }],
+    "filters": [{ "id": "@naevic/agent-memoize/stale-filter" }],
+    "organizers": [{ "id": "@naevic/agent-memoize/dream-organizer" }],
+    "observers": [
+      { "id": "@naevic/agent-memoize-plugin-log-observer", "options": { "port": 8888 } }
+    ]
+  }
 }
 ```
+
+The config `id` is the package name; the plugin registers itself under its own declared id
+(`dashboard`), which is what appears in logs and plugin tool names.
 
 Open `http://127.0.0.1:8888` to see the activity stream (auto-refreshes every 2 s). Raw logs
 are available at `/api/logs`; they are also appended as JSONL to

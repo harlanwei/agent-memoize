@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseEntry, plugin as filesDb, serializeEntry } from "../src/plugins/builtin/db-files.js";
+import { parseEntry, plugin as filesDb, serializeEntry } from "../src/plugins/builtin/file-ledger.js";
 import { isValidName, matchesAny, storePath, walkTree } from "../src/workspace.js";
 import { tmpDir, write } from "./helpers.js";
 

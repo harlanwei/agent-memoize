@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
-import type { DatabasePlugin, PluginContext } from "../../plugin.js";
+import type { LedgerPlugin, PluginContext } from "../../plugin.js";
 import { storePath } from "../../workspace.js";
 import type { Entry, Manifest } from "../../types.js";
 
@@ -50,10 +50,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let root = "";
 
-export const plugin: DatabasePlugin = {
-  id: "files",
+export const plugin: LedgerPlugin = {
+  id: "@naevic/agent-memoize/file-ledger",
   version: "1.0.0",
-  type: "database",
+  type: "ledger",
 
   async init(ctx: PluginContext) {
     root = ctx.root;

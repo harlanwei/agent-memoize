@@ -1,11 +1,11 @@
-import type { DataSourcePlugin } from "../../plugin.js";
+import type { ProducerPlugin } from "../../plugin.js";
 
 const WIDE_GLOB_THRESHOLD = 20;
 
-export const plugin: DataSourcePlugin = {
-  id: "agent",
+export const plugin: ProducerPlugin = {
+  id: "@naevic/agent-memoize/agent-producer",
   version: "1.0.0",
-  type: "datasource",
+  type: "producer",
 
   describeUpdate() {
     return (

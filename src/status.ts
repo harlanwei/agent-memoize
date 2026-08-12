@@ -19,7 +19,7 @@ import {
   walkTree,
 } from "./workspace.js";
 import { getRegistry } from "./plugins/registry.js";
-import type { DatabasePlugin } from "./plugin.js";
+import type { LedgerPlugin } from "./plugin.js";
 import type { ClaimRegion, Entry, EntryBaseline, FileFingerprint, StaleEntry, StalenessPolicy, StatusResult } from "./types.js";
 
 /** Output arrays are capped so a huge diff can't flood the agent's context. */
@@ -27,7 +27,7 @@ const CAP = 50;
 
 export interface StatusContext {
   root: string;
-  db: DatabasePlugin;
+  db: LedgerPlugin;
   staleness: StalenessPolicy;
   ignoreComments: boolean;
 }
