@@ -29,6 +29,37 @@ compact — the store costs almost no context when unused.
 
 ## Install
 
+### Automatic installation (macOS, Linux, WSL)
+
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/harlanwei/memoize/main/install.sh)
+```
+
+It installs the MCP server globally, detects which coding agents you have and
+asks which to configure as MCP clients, and injects the workflow prompt into
+your project's `AGENTS.md`/`CLAUDE.md` — and, on request, the global agent
+prompts (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+`~/.config/opencode/AGENTS.md`, `~/.kimi-code/AGENTS.md`, `~/.zcode/AGENTS.md`).
+
+> Run it from the project directory you want to configure: project-scope
+> configs (`.mcp.json`, `opencode.json`, `.kimi-code/mcp.json`,
+> `.zcode/config.json`, `AGENTS.md`) are written into your current directory,
+> and Codex's `~/.codex/config.toml` into your home directory. Config edits
+> are backed up to `*.bak` before being edited, and the prompt injection is
+> idempotent — re-running never duplicates an entry.
+>
+> `bash <(…)` is used instead of `curl … | bash` so the script's prompts can
+> still read your answers from the terminal.
+
+| Flag | Meaning |
+| --- | --- |
+| `--agent claude,codex` | Configure only the listed agents (no detection, no prompts) |
+| `--yes` | Approve every prompt automatically |
+
+### Manual installation (macOS, Linux, Windows)
+<details>
+<summary>Expand</summary>
+
 ### Step 1: install it on your computer
 
 ```sh
@@ -146,6 +177,7 @@ Add this block to your project's `AGENTS.md` (read by
 most coding agents, including Codex, OpenCode, Pi, ZCode, and Kimi Code) or `CLAUDE.md` (Claude Code) so agents adopt the workflow:
 
 ```markdown
+<!-- agent-memoize:start -->
 ## Project memory (agent-memoize MCP)
 
 - At session start, call `memoize_status` once. If entries are stale, re-read only the listed
@@ -158,7 +190,19 @@ most coding agents, including Codex, OpenCode, Pi, ZCode, and Kimi Code) or `CLA
 - Record user decisions and preferences with `memoize_update` (kind="decision", no sources).
 - Memory guides navigation only: always read a file before editing it, even if memory
   describes it.
+<!-- agent-memoize:end -->
 ```
+
+Or, better yet, inject it using the CLI:
+
+```sh
+agent-memoize --inject                       # current project: AGENTS.md and CLAUDE.md
+                                             # (both created if missing)
+agent-memoize --inject global                # global prompts of every supported agent
+                                             # installed on PATH
+agent-memoize --inject global:claude,codex   # ... or just the listed agents
+```
+</details>
 
 ## Tools
 

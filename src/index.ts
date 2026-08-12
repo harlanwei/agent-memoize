@@ -5,22 +5,42 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx, type ServiceContext } from "./service.js";
+import {
+  GLOBAL_PROMPT_FILES,
+  injectGlobalPrompt,
+  injectProjectPrompt,
+  installedAgents,
+  type InjectAction,
+} from "./inject.js";
 import { Registry } from "./plugins/registry.js";
 
 const { version: VERSION } = createRequire(import.meta.url)("../package.json") as {
   version: string;
 };
 
+type InjectMode = "project" | "global" | `global:${string}`;
+
 function usage(): string {
   return `agent-memoize ${VERSION} — shared project-memory MCP server
 
 Usage: agent-memoize [--root <dir>] [--plugins <json>]
+       agent-memoize --inject [global[:<agents>]] [--root <dir>]
 
 Options:
   --root <dir>       Project root containing (or to contain) .agent-memoize/
                      Default: MEMOIZE_ROOT env var, else the current directory.
   --plugins <json>   Override .agent-memoize/config.json plugins, e.g.
                      [{ "id": "files" }, ...]
+  --inject           Inject the agent-workflow prompt and exit:
+                     --inject                     current project (AGENTS.md and
+                                                  CLAUDE.md, created if missing)
+                     --inject global              global prompts of every
+                                                  supported agent on PATH
+                     --inject global:claude,codex global prompts of the listed
+                                                  agents
+                     The block is wrapped in <!-- agent-memoize:start --> /
+                     <!-- agent-memoize:end --> comments and is replaced in
+                     place when the prompt changes.
   -h, --help         Show this help.
   -v, --version      Show version.
 
@@ -30,9 +50,10 @@ Env:
 `;
 }
 
-function parseArgs(argv: string[]): { root: string; plugins?: string } {
+function parseArgs(argv: string[]): { root: string; plugins?: string; injectMode?: InjectMode } {
   let root: string | undefined;
   let plugins: string | undefined;
+  let injectMode: InjectMode | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--root") {
@@ -41,6 +62,20 @@ function parseArgs(argv: string[]): { root: string; plugins?: string } {
     } else if (a === "--plugins") {
       plugins = argv[++i];
       if (!plugins) throw new Error("--plugins requires a value");
+    } else if (a === "--inject") {
+      const next = argv[i + 1];
+      if (next === "global") {
+        injectMode = "global";
+        i++;
+      } else if (next !== undefined && next.startsWith("global:")) {
+        if (next === "global:") {
+          throw new Error("--inject global:<agents> requires at least one agent, e.g. --inject global:claude,codex");
+        }
+        injectMode = next as `global:${string}`;
+        i++;
+      } else {
+        injectMode = "project";
+      }
     } else if (a === "-h" || a === "--help") {
       console.log(usage());
       process.exit(0);
@@ -51,10 +86,48 @@ function parseArgs(argv: string[]): { root: string; plugins?: string } {
       throw new Error(`unknown argument: ${a}\n${usage()}`);
     }
   }
-  return { root: path.resolve(root ?? process.env.MEMOIZE_ROOT ?? process.cwd()), plugins };
+  return {
+    root: path.resolve(root ?? process.env.MEMOIZE_ROOT ?? process.cwd()),
+    plugins,
+    injectMode,
+  };
 }
 
-const { root, plugins: cliPlugins } = parseArgs(process.argv.slice(2));
+const { root, plugins: cliPlugins, injectMode } = parseArgs(process.argv.slice(2));
+
+if (injectMode) {
+  const describe = (action: InjectAction, target: string) =>
+    action === "skipped"
+      ? `${target}: already contains the workflow prompt (skipped)`
+      : `${action} ${target}`;
+  try {
+    if (injectMode === "project") {
+      const { written, updated, skipped } = await injectProjectPrompt(root);
+      for (const rel of written) console.log(describe("written", rel));
+      for (const rel of updated) console.log(describe("updated", rel));
+      for (const rel of skipped) console.log(describe("skipped", rel));
+    } else {
+      const explicit = injectMode.startsWith("global:")
+        ? injectMode.slice("global:".length).split(",")
+        : undefined;
+      const agents = explicit ?? (await installedAgents());
+      if (agents.length === 0) {
+        console.log(
+          `no supported agents found on PATH (${Object.keys(GLOBAL_PROMPT_FILES).join(", ")}) — nothing to inject`,
+        );
+      } else {
+        for (const agent of agents) {
+          const { file, action } = await injectGlobalPrompt(agent);
+          console.log(describe(action, file));
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`agent-memoize: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
 
 let registry: Registry;
 try {
