@@ -13,7 +13,7 @@ import {
   normalizeLine,
   storePath,
 } from "../src/workspace.js";
-import { tmpDir, write } from "./helpers.js";
+import { tmpDir, gitRepo, commitAll, write } from "./helpers.js";
 
 // File whose content shares tokens with the entry text, so claim regions exist.
 const LOGIN_SRC = [
@@ -382,6 +382,85 @@ describe("Change C: new files inside a sources glob", () => {
     expect(await entryReferencesFile(dir, "a.ts", "Describes auth.")).toBe(false);
     await write(dir, "b.ts", "export const auth = true;\n");
     expect(await entryReferencesFile(dir, "b.ts", "Describes auth.")).toBe(true);
+  });
+});
+
+describe("re-baseline must not erase staleness evidence", () => {
+  it("a stale entry stays stale across runs until re-updated (hash mode)", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
+    await tick();
+    // Break the claim line AND add an unrelated new file (the latter
+    // would normally trigger an auto re-baseline of the whole entry).
+    await write(dir, "src/auth/login.ts", LOGIN_SRC.replace("jwt.sign({ user })", "jwt.sign({ user, role })"));
+    await write(dir, "src/auth/session.ts", "totally unrelated content here\n");
+    let s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/auth/login.ts"]);
+    expect(s.verifiedEntries).toEqual([]);
+    // A second run with no agent action must still report stale —
+    // the broken claims must not be re-baselined away.
+    s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/auth/login.ts"]);
+    expect(s.verifiedEntries).toEqual([]);
+    // Only a real memoize_update clears it.
+    await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
+    expect((await computeStatus(dir)).state).toBe("fresh");
+  });
+
+  it("a stale entry stays stale across runs until re-updated (git mode)", async () => {
+    const dir = await gitRepo();
+    await write(dir, "src/auth/login.ts", LOGIN_SRC);
+    await commitAll(dir);
+    await updateEntry(dir, { ...entry, sources: ["src/auth/**"] });
+    await write(dir, "src/auth/login.ts", LOGIN_SRC.replace("jwt.sign({ user })", "jwt.sign({ user, role })"));
+    await write(dir, "src/auth/session.ts", "totally unrelated content here\n");
+    await commitAll(dir, "break claim");
+    let s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/auth/login.ts"]);
+    s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/auth/login.ts"]);
+    expect(s.verifiedEntries).toEqual([]);
+  });
+
+  it("a suspended entry with a vanished source stays suspended across runs", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/a.ts", "export function alpha() { return 1; }\n");
+    await write(dir, "src/b.ts", "export function beta() { return 2; }\n");
+    await updateEntry(dir, {
+      name: "both",
+      kind: "file",
+      sources: ["src/a.ts", "src/b.ts"],
+      content: "alpha and beta helpers.",
+      author: "test",
+    });
+    await tick();
+    // Vanish one source (no rename) and make a non-claim edit to the other —
+    // the latter would normally re-baseline the entry and absorb the delete.
+    await fs.rm(path.join(dir, "src/a.ts"));
+    await write(dir, "src/b.ts", "export function beta() { return 2; }\n// extra note\n");
+    let s = await computeStatus(dir);
+    expect(s.suspendedEntries).toContain("both");
+    expect(s.deletedFiles).toContain("src/a.ts");
+    // An entry must never be both suspended and verified in one report.
+    expect(s.verifiedEntries).toEqual([]);
+    s = await computeStatus(dir);
+    expect(s.suspendedEntries).toContain("both");
+    expect(s.deletedFiles).toContain("src/a.ts");
+    expect(s.verifiedEntries).toEqual([]);
+    // Re-deriving from what remains clears the suspension.
+    await updateEntry(dir, {
+      name: "both",
+      kind: "file",
+      sources: ["src/b.ts"],
+      content: "beta helper.",
+      author: "test",
+    });
+    expect((await computeStatus(dir)).state).toBe("fresh");
   });
 });
 

@@ -260,13 +260,14 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
           brokenClaims: entryBrokenClaims.length > 0 ? entryBrokenClaims : undefined,
         });
       }
-      if (needsRebaseline) reBaseline.set(e.name, { name: e.name, sources: e.sources });
+      // No re-baseline for entries with stale sources, even when other files
+      // triggered needsRebaseline or a rename: rebuilding the baseline would
+      // fingerprint the broken/vanished content and erase the staleness
+      // signal on the next run. The entry stays stale/suspended until the
+      // agent re-reads it and calls memoize_update.
     } else if (matched.length === 0 && renames.length === 0) {
       suspended.push(e.name);
-    } else if (needsRebaseline) {
-      reBaseline.set(e.name, { name: e.name, sources: e.sources });
-    }
-    if (renames.length > 0) {
+    } else if (renames.length > 0) {
       reBaseline.set(e.name, {
         name: e.name,
         sources: e.sources.map((s) => {
@@ -274,12 +275,15 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
           return r ? r.to : s;
         }),
       });
+    } else if (needsRebaseline) {
+      reBaseline.set(e.name, { name: e.name, sources: e.sources });
     }
   }
 
   // Auto re-baseline (Layer 2/3): best-effort; on lock failure entries stay
   // fresh-as-verified but are simply re-checked next run.
   const staleNames = new Set(stale.map((s) => s.name));
+  const suspendedNames = new Set(suspended);
   const verified: string[] = [];
   if (reBaseline.size > 0) {
     try {
@@ -297,12 +301,14 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         await db.saveManifest(m);
       });
       for (const name of reBaseline.keys()) {
-        if (!staleNames.has(name)) verified.push(name);
+        // Belt-and-braces: reBaseline is only populated for entries with no
+        // stale sources, but never report a stale/suspended entry as verified.
+        if (!staleNames.has(name) && !suspendedNames.has(name)) verified.push(name);
       }
     } catch {
       // lock timeout or write failure — verified entries stay reported, not persisted
       for (const name of reBaseline.keys()) {
-        if (!staleNames.has(name)) verified.push(name);
+        if (!staleNames.has(name) && !suspendedNames.has(name)) verified.push(name);
       }
     }
   }
