@@ -52,18 +52,18 @@ function memoryDbPlugin(id = "agent-memoize-memory-db"): any {
   };
 }
 
-import { plugin as filesDb } from "../src/plugins/builtin/file-ledger.js";
-import { plugin as markdownFmt } from "../src/plugins/builtin/markdown-writer.js";
-import { plugin as stalenessFilter } from "../src/plugins/builtin/stale-filter.js";
-import { plugin as agentDs } from "../src/plugins/builtin/agent-producer.js";
-import { plugin as dreaming } from "../src/plugins/builtin/dream-organizer.js";
+import { createPlugin as createFilesDb } from "../src/plugins/builtin/file-ledger.js";
+import { createPlugin as createMarkdownFmt } from "../src/plugins/builtin/markdown-writer.js";
+import { createPlugin as createStalenessFilter } from "../src/plugins/builtin/stale-filter.js";
+import { createPlugin as createAgentDs } from "../src/plugins/builtin/agent-producer.js";
+import { createPlugin as createDreaming } from "../src/plugins/builtin/dream-organizer.js";
 
-const builtinById: Record<string, any> = {
-  "@naevic/agent-memoize/file-ledger": filesDb,
-  "@naevic/agent-memoize/markdown-writer": markdownFmt,
-  "@naevic/agent-memoize/stale-filter": stalenessFilter,
-  "@naevic/agent-memoize/agent-producer": agentDs,
-  "@naevic/agent-memoize/dream-organizer": dreaming,
+const builtinById: Record<string, () => any> = {
+  "@naevic/agent-memoize/file-ledger": createFilesDb,
+  "@naevic/agent-memoize/markdown-writer": createMarkdownFmt,
+  "@naevic/agent-memoize/stale-filter": createStalenessFilter,
+  "@naevic/agent-memoize/agent-producer": createAgentDs,
+  "@naevic/agent-memoize/dream-organizer": createDreaming,
 };
 
 /** The three required categories; tests add optional categories on top. */
@@ -77,7 +77,8 @@ function loaderFor(plugins: any[]): any {
   return async (id: string) => {
     const p = plugins.find((x) => x.id === id);
     if (p) return p;
-    if (builtinById[id]) return builtinById[id];
+    const make = builtinById[id];
+    if (make) return make();
     throw new Error("missing plugin: " + id);
   };
 }
@@ -97,6 +98,25 @@ describe("registry config", () => {
     expect(r.producers[0].id).toBe("@naevic/agent-memoize/agent-producer");
     expect(r.organizers[0].id).toBe("@naevic/agent-memoize/dream-organizer");
     expect(r.staleness).toBe("selective");
+  });
+
+  it("isolates builtin plugin state across registries with different roots", async () => {
+    const dirA = await tmpDir();
+    const dirB = await tmpDir();
+    const a = await Registry.create({ root: dirA });
+    const b = await Registry.create({ root: dirB });
+    await a.primaryDb.writeEntry({
+      name: "x",
+      kind: "decision",
+      sources: [],
+      author: "test",
+      updated: "2026-01-01T00:00:00.000Z",
+      summary: "s",
+      content: "c",
+    });
+    // B's creation must not redirect A's ledger: A still sees its own store.
+    expect((await a.primaryDb.listEntries()).entries.map((e) => e.name)).toEqual(["x"]);
+    expect((await b.primaryDb.listEntries()).entries).toEqual([]);
   });
 
   it("reads the config file from the store dir", async () => {
@@ -314,7 +334,7 @@ describe("registry config", () => {
             },
           };
         }
-        if (builtinById[id]) return builtinById[id];
+        if (builtinById[id]) return builtinById[id]();
         throw new Error("missing plugin: " + id);
       },
     });
@@ -636,7 +656,7 @@ describe("dynamic import of external plugins", () => {
     );
     await writeConfig(dir, { ...REQUIRED, filters: [{ id: mod, options: { threshold: 7 } }] });
     const r = await Registry.create({ root: dir, load: async (id) => {
-      if (builtinById[id]) return builtinById[id];
+      if (builtinById[id]) return builtinById[id]();
       const m = (await import(id)) as { plugin: any };
       return { ...m.plugin, init: async (ctx: any) => { seen = ctx.options; } };
     } });

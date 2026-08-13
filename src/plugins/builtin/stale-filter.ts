@@ -7,11 +7,13 @@ import type { FilterPlugin } from "../../plugin.js";
  * the config array to compose around (e.g. a reranker listed before it, or
  * an LLM verifier that flips status from stale to verified listed after it).
  */
-export const plugin: FilterPlugin = {
-  id: "@naevic/agent-memoize/stale-filter",
-  version: "1.0.0",
-  type: "filter",
-  async filter(_query, candidates) {
-    return candidates;
-  },
-};
+export function createPlugin(): FilterPlugin {
+  return {
+    id: "@naevic/agent-memoize/stale-filter",
+    version: "1.0.0",
+    type: "filter",
+    async filter(_query, candidates) {
+      return candidates;
+    },
+  };
+}

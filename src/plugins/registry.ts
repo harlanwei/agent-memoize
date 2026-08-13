@@ -39,7 +39,16 @@ export type {
   ToolRegistration,
 } from "../plugin.js";
 
-const BUILTIN_MODULES: Record<string, () => Promise<{ plugin: BasePlugin }>> = {
+/**
+ * Builtin modules export a `createPlugin` factory so every config entry gets
+ * a fresh plugin instance — builtins keep no state at module scope, and
+ * registries for different roots in one process never share it.
+ */
+interface BuiltinPluginModule {
+  createPlugin(): BasePlugin;
+}
+
+const BUILTIN_MODULES: Record<string, () => Promise<BuiltinPluginModule>> = {
   "@naevic/agent-memoize/file-ledger": () => import("./builtin/file-ledger.js"),
   "@naevic/agent-memoize/markdown-writer": () => import("./builtin/markdown-writer.js"),
   "@naevic/agent-memoize/stale-filter": () => import("./builtin/stale-filter.js"),
@@ -404,7 +413,7 @@ async function loadOne(
 function defaultLoader(root: string): PluginLoader {
   return async (id, options) => {
     const builtin = BUILTIN_MODULES[id];
-    if (builtin) return (await builtin()).plugin;
+    if (builtin) return (await builtin()).createPlugin();
     return loadExternal(id, options, root);
   };
 }

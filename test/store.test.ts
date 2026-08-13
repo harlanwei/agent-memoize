@@ -1,13 +1,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseEntry, plugin as filesDb, serializeEntry } from "../src/plugins/builtin/file-ledger.js";
+import { createPlugin as createFilesDb, parseEntry, serializeEntry } from "../src/plugins/builtin/file-ledger.js";
 import { isValidName, matchesAny, storePath, walkTree } from "../src/workspace.js";
 import { tmpDir, write } from "./helpers.js";
 
 async function initDb(dir: string) {
-  await filesDb.init?.({ root: dir, options: {}, db: filesDb as never, log: () => {}, registerTool: () => {} });
-  return filesDb;
+  const db = createFilesDb();
+  await db.init?.({ root: dir, options: {}, db, log: () => {}, registerTool: () => {} });
+  return db;
 }
 
 describe("entry front matter", () => {

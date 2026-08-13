@@ -48,105 +48,112 @@ export function parseEntry(name: string, text: string): Entry {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-let root = "";
+/**
+ * A fresh ledger instance per config entry. `root` lives in the closure, never
+ * in module scope, so registries for different projects in one process stay
+ * isolated.
+ */
+export function createPlugin(): LedgerPlugin {
+  let root = "";
 
-export const plugin: LedgerPlugin = {
-  id: "@naevic/agent-memoize/file-ledger",
-  version: "1.0.0",
-  type: "ledger",
+  return {
+    id: "@naevic/agent-memoize/file-ledger",
+    version: "1.0.0",
+    type: "ledger",
 
-  async init(ctx: PluginContext) {
-    root = ctx.root;
-  },
+    async init(ctx: PluginContext) {
+      root = ctx.root;
+    },
 
-  async listEntries() {
-    const names: string[] = [];
-    await walkStore(storePath(root), "", names);
-    const entries: Entry[] = [];
-    const invalid: string[] = [];
-    for (const name of names.sort()) {
-      try {
-        entries.push(parseEntry(name, await fs.readFile(entryFilePath(root, name), "utf8")));
-      } catch {
-        invalid.push(name);
-      }
-    }
-    return { entries, invalid };
-  },
-
-  async readEntry(name) {
-    try {
-      return parseEntry(name, await fs.readFile(entryFilePath(root, name), "utf8"));
-    } catch {
-      return null;
-    }
-  },
-
-  async writeEntry(entry) {
-    const fp = entryFilePath(root, entry.name);
-    await fs.mkdir(path.dirname(fp), { recursive: true });
-    await writeAtomic(fp, serializeEntry(entry));
-  },
-
-  async deleteEntry(name) {
-    try {
-      await fs.unlink(entryFilePath(root, name));
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
-  async loadManifest() {
-    try {
-      const m = JSON.parse(await fs.readFile(path.join(storePath(root), MANIFEST_FILE), "utf8"));
-      if (m && typeof m === "object" && m.entries && typeof m.entries === "object") {
-        return { version: 1, entries: m.entries };
-      }
-    } catch {
-      // missing or corrupt — start over
-    }
-    return { version: 1, entries: {} };
-  },
-
-  async saveManifest(m: Manifest) {
-    const fp = path.join(storePath(root), MANIFEST_FILE);
-    await fs.mkdir(path.dirname(fp), { recursive: true });
-    await writeAtomic(fp,
-      JSON.stringify(m, null, 2) + "\n",
-    );
-  },
-
-  async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const lockPath = path.join(storePath(root), LOCK_DIR);
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    for (;;) {
-      try {
-        await fs.mkdir(lockPath);
-        break;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    async listEntries() {
+      const names: string[] = [];
+      await walkStore(storePath(root), "", names);
+      const entries: Entry[] = [];
+      const invalid: string[] = [];
+      for (const name of names.sort()) {
         try {
-          const st = await fs.stat(lockPath);
-          if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-            // Crashed agent left the lock behind; reclaim it.
-            await fs.rm(lockPath, { recursive: true, force: true });
-            continue;
-          }
+          entries.push(parseEntry(name, await fs.readFile(entryFilePath(root, name), "utf8")));
         } catch {
-          continue; // lock vanished between stat attempts
+          invalid.push(name);
         }
-        if (Date.now() > deadline) throw new Error("memoize: timed out waiting for store lock");
-        await sleep(100);
       }
-    }
-    try {
-      return await fn();
-    } finally {
-      await fs.rm(lockPath, { recursive: true, force: true });
-    }
-  },
-};
+      return { entries, invalid };
+    },
+
+    async readEntry(name) {
+      try {
+        return parseEntry(name, await fs.readFile(entryFilePath(root, name), "utf8"));
+      } catch {
+        return null;
+      }
+    },
+
+    async writeEntry(entry) {
+      const fp = entryFilePath(root, entry.name);
+      await fs.mkdir(path.dirname(fp), { recursive: true });
+      await writeAtomic(fp, serializeEntry(entry));
+    },
+
+    async deleteEntry(name) {
+      try {
+        await fs.unlink(entryFilePath(root, name));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    async loadManifest() {
+      try {
+        const m = JSON.parse(await fs.readFile(path.join(storePath(root), MANIFEST_FILE), "utf8"));
+        if (m && typeof m === "object" && m.entries && typeof m.entries === "object") {
+          return { version: 1, entries: m.entries };
+        }
+      } catch {
+        // missing or corrupt — start over
+      }
+      return { version: 1, entries: {} };
+    },
+
+    async saveManifest(m: Manifest) {
+      const fp = path.join(storePath(root), MANIFEST_FILE);
+      await fs.mkdir(path.dirname(fp), { recursive: true });
+      await writeAtomic(fp,
+        JSON.stringify(m, null, 2) + "\n",
+      );
+    },
+
+    async withLock<T>(fn: () => Promise<T>): Promise<T> {
+      const lockPath = path.join(storePath(root), LOCK_DIR);
+      const deadline = Date.now() + LOCK_TIMEOUT_MS;
+      for (;;) {
+        try {
+          await fs.mkdir(lockPath);
+          break;
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+          try {
+            const st = await fs.stat(lockPath);
+            if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+              // Crashed agent left the lock behind; reclaim it.
+              await fs.rm(lockPath, { recursive: true, force: true });
+              continue;
+            }
+          } catch {
+            continue; // lock vanished between stat attempts
+          }
+          if (Date.now() > deadline) throw new Error("memoize: timed out waiting for store lock");
+          await sleep(100);
+        }
+      }
+      try {
+        return await fn();
+      } finally {
+        await fs.rm(lockPath, { recursive: true, force: true });
+      }
+    },
+  };
+}
 
 async function walkStore(dir: string, base: string, out: string[]): Promise<void> {
   let dirents;

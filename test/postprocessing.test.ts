@@ -5,11 +5,11 @@ import { Registry } from "../src/plugins/registry.js";
 import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx } from "../src/service.js";
 import type { ServiceContext } from "../src/service.js";
 import { tmpDir, write } from "./helpers.js";
-import { plugin as filesDb } from "../src/plugins/builtin/file-ledger.js";
-import { plugin as markdownFmt } from "../src/plugins/builtin/markdown-writer.js";
-import { plugin as stalenessFilter } from "../src/plugins/builtin/stale-filter.js";
-import { plugin as agentDs } from "../src/plugins/builtin/agent-producer.js";
-import { plugin as dreaming } from "../src/plugins/builtin/dream-organizer.js";
+import { createPlugin as createFilesDb } from "../src/plugins/builtin/file-ledger.js";
+import { createPlugin as createMarkdownFmt } from "../src/plugins/builtin/markdown-writer.js";
+import { createPlugin as createStalenessFilter } from "../src/plugins/builtin/stale-filter.js";
+import { createPlugin as createAgentDs } from "../src/plugins/builtin/agent-producer.js";
+import { createPlugin as createDreaming } from "../src/plugins/builtin/dream-organizer.js";
 import {
   logs as dashboardLogs,
   plugin as dashboard,
@@ -18,19 +18,20 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const builtinById: Record<string, any> = {
-  "@naevic/agent-memoize/file-ledger": filesDb,
-  "@naevic/agent-memoize/markdown-writer": markdownFmt,
-  "@naevic/agent-memoize/stale-filter": stalenessFilter,
-  "@naevic/agent-memoize/agent-producer": agentDs,
-  "@naevic/agent-memoize/dream-organizer": dreaming,
+const builtinById: Record<string, () => any> = {
+  "@naevic/agent-memoize/file-ledger": createFilesDb,
+  "@naevic/agent-memoize/markdown-writer": createMarkdownFmt,
+  "@naevic/agent-memoize/stale-filter": createStalenessFilter,
+  "@naevic/agent-memoize/agent-producer": createAgentDs,
+  "@naevic/agent-memoize/dream-organizer": createDreaming,
 };
 
 function loaderFor(plugins: any[]): any {
   return async (id: string) => {
     const p = plugins.find((x) => x.id === id);
     if (p) return p;
-    if (builtinById[id]) return builtinById[id];
+    const make = builtinById[id];
+    if (make) return make();
     throw new Error("missing plugin: " + id);
   };
 }
@@ -208,7 +209,7 @@ describe("dreaming plugin", () => {
   it("stays quiet below the threshold (default 15)", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, { organizers: [dreaming] });
+    const r = await makeRegistry(dir, { organizers: [createDreaming()] });
     const ctx = ctxFor(r, dir);
     await updateEntryCtx(ctx, {
       name: "m1",
@@ -235,7 +236,7 @@ describe("dreaming plugin", () => {
   it("annotates status with a dreaming plan once stale memories reach the threshold", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, { organizers: [dreaming] }, {
+    const r = await makeRegistry(dir, { organizers: [createDreaming()] }, {
       plugins: {
         ...defaultPlugins,
         organizers: [{ id: "@naevic/agent-memoize/dream-organizer", options: { threshold: 2 } }],
@@ -264,7 +265,7 @@ describe("dreaming plugin", () => {
   it("counts suspended memories and leaves other operations untouched", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
-    const r = await makeRegistry(dir, { organizers: [dreaming] }, {
+    const r = await makeRegistry(dir, { organizers: [createDreaming()] }, {
       plugins: {
         ...defaultPlugins,
         organizers: [{ id: "@naevic/agent-memoize/dream-organizer", options: { threshold: 1 } }],
