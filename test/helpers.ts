@@ -20,7 +20,9 @@ export async function commitAll(dir: string, msg = "commit"): Promise<void> {
   await sh("git", ["add", "-A"], { cwd: dir });
   await sh(
     "git",
-    ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--allow-empty", "-m", msg],
+    // commit.gpgsign=false: test commits must never reach a signing agent
+    // (e.g. 1Password's op-ssh-sign), which can block on an interactive prompt.
+    ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", msg],
     { cwd: dir },
   );
 }
