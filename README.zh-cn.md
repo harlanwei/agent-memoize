@@ -115,7 +115,7 @@ pi install npm:pi-mcp-adapter
 }
 ```
 
-**DeepSeek Harness** ——（待补充）
+**DeepSeek Harness (DSH)** —— 在发布稳定版本前不提供官方支持。它或许可以作为标准 MCP 客户端使用，但在此之前我们不会提供配置文档或作出任何保证。
 
 **Kimi Code** —— `~/.kimi-code/mcp.json`（用户级）或 `<project>/.kimi-code/mcp.json`（项目级）：
 

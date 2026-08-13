@@ -115,7 +115,7 @@ Pi doesn't load MCP servers without it. Once installed, the adapter reads standa
 }
 ```
 
-**DeepSeek Harness** — (TBA)
+**DeepSeek Harness (DSH)** — not officially supported until it ships a stable release. It may work as a standard MCP client, but we won't document or guarantee setup until then.
 
 **Kimi Code** — `~/.kimi-code/mcp.json` (user scope) or `<project>/.kimi-code/mcp.json` (project scope):
 
