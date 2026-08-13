@@ -1,7 +1,7 @@
 export type EntryKind = "file" | "decision";
 
-/** How aggressively file changes invalidate entries (config knob, default "claims"). */
-export type StalenessPolicy = "strict" | "claims" | "cosmetic-only";
+/** How aggressively file changes invalidate entries (config knob, default "selective"). */
+export type StalenessPolicy = "strict" | "selective";
 
 /** Per-entry freshness grade surfaced in status/recall. */
 export type EntryStatus = "fresh" | "verified" | "stale" | "suspended";
@@ -36,7 +36,7 @@ export interface FileFingerprint {
 
 /**
  * A region in a source file that the entry's text references. Staleness for
- * "claims"/"cosmetic-only" policies is judged on these regions only.
+ * the "selective" (non-strict) policy is judged on these regions only.
  *
  * A region is normally a single line, but may span a balanced block (function,
  * object, etc.) opened at `line` and closing at `end` — such a claim survives

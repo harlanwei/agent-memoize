@@ -96,7 +96,7 @@ describe("registry config", () => {
     expect(r.filters[0].id).toBe("@naevic/agent-memoize/stale-filter");
     expect(r.producers[0].id).toBe("@naevic/agent-memoize/agent-producer");
     expect(r.organizers[0].id).toBe("@naevic/agent-memoize/dream-organizer");
-    expect(r.staleness).toBe("claims");
+    expect(r.staleness).toBe("selective");
   });
 
   it("reads the config file from the store dir", async () => {
@@ -218,9 +218,17 @@ describe("registry config", () => {
   it("MEMOIZE_STALENESS env overrides the config knob", async () => {
     const dir = await tmpDir();
     await writeConfig(dir, { ...REQUIRED }, "strict");
-    process.env.MEMOIZE_STALENESS = "cosmetic-only";
+    process.env.MEMOIZE_STALENESS = "selective";
     const r = await Registry.create({ root: dir });
-    expect(r.staleness).toBe("cosmetic-only");
+    expect(r.staleness).toBe("selective");
+  });
+
+  it("rejects an unknown staleness value in the config file", async () => {
+    const dir = await tmpDir();
+    for (const bad of ["claim", "claims", "cosmetic-only"]) {
+      await writeConfig(dir, { ...REQUIRED }, bad);
+      await expect(Registry.create({ root: dir })).rejects.toThrow(/must be one of/);
+    }
   });
 
   it("rejects a broken config file", async () => {

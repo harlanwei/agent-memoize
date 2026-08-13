@@ -156,7 +156,7 @@ describe("Change A: normalized claim-line hashes", () => {
   });
 });
 
-describe("staleness matrix (claims policy, default)", () => {
+describe("staleness matrix (selective policy, default)", () => {
   it("stays fresh on a cosmetic edit (trailing whitespace)", async () => {
     const dir = await setup();
     await tick();
@@ -330,8 +330,8 @@ describe("staleness policies", () => {
     expect(s.state).toBe("stale");
   });
 
-  it("cosmetic-only: only claim-line changes invalidate", async () => {
-    process.env.MEMOIZE_STALENESS = "cosmetic-only";
+  it("selective: only claim-line changes invalidate", async () => {
+    process.env.MEMOIZE_STALENESS = "selective";
     const dir = await setup();
     await tick();
     await write(dir, "src/auth/login.ts", LOGIN_SRC + "\n// unrelated helper note\n");

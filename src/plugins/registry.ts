@@ -69,7 +69,7 @@ const RESERVED_TOOLS = new Set([
   "memoize_invalidate",
 ]);
 
-const STALENESS_POLICIES: StalenessPolicy[] = ["strict", "claims", "cosmetic-only"];
+const STALENESS_POLICIES: StalenessPolicy[] = ["strict", "selective"];
 
 export type PluginLoader = (id: string, options: Record<string, unknown>) => Promise<BasePlugin>;
 
@@ -110,7 +110,10 @@ export class Registry {
     const file = await readConfigFile(opts.root);
     const configured =
       parsePluginList(opts.cliPlugins, process.env.MEMOIZE_PLUGINS) ?? file.plugins ?? {};
-    const staleness = parseStaleness(process.env.MEMOIZE_STALENESS) ?? file.staleness ?? "claims";
+    const staleness =
+      parseStaleness(process.env.MEMOIZE_STALENESS, "MEMOIZE_STALENESS") ??
+      file.staleness ??
+      "selective";
     const ignoreComments = file.ignoreComments ?? false;
     validatePluginGroup(configured);
     // A category the user did not configure falls back to its default
@@ -280,7 +283,9 @@ async function readConfigFile(root: string): Promise<{
     }
     out.plugins = obj.plugins as PluginConfigGroup;
   }
-  if (typeof obj.staleness === "string") out.staleness = obj.staleness as StalenessPolicy;
+  if (typeof obj.staleness === "string") {
+    out.staleness = parseStaleness(obj.staleness, "staleness in .agent-memoize/config.json")!;
+  }
   if (typeof obj.ignoreComments === "boolean") out.ignoreComments = obj.ignoreComments;
   return out;
 }
@@ -305,10 +310,10 @@ function parsePluginList(
   return parsed as PluginConfigGroup;
 }
 
-function parseStaleness(v: string | undefined): StalenessPolicy | null {
+function parseStaleness(v: string | undefined, source: string): StalenessPolicy | null {
   if (v === undefined) return null;
   if (!STALENESS_POLICIES.includes(v as StalenessPolicy)) {
-    throw new Error(`MEMOIZE_STALENESS must be one of: ${STALENESS_POLICIES.join(", ")}`);
+    throw new Error(`${source} must be one of: ${STALENESS_POLICIES.join(", ")}`);
   }
   return v as StalenessPolicy;
 }

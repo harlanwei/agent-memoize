@@ -17,8 +17,7 @@ Then the **staleness policy** decides what counts as stale:
 | Policy | Cosmetic edits (whitespace/comments) | Non-claim edits | Claim-line edits | New files in `sources` |
 | --- | --- | --- | --- | --- |
 | `strict` | stale | stale | stale | stale |
-| `claims` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale |
-| `cosmetic-only` | fresh | auto re-baselined | **stale** | stale |
+| `selective` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale when referenced, else re-baselined |
 
 A **claim line** is a line of a source file that the entry text references; staleness is judged
 on claim lines only, and the check is position-independent (inserting or removing lines

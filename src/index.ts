@@ -49,7 +49,7 @@ Options:
 
 Env:
   MEMOIZE_PLUGINS      JSON plugins config keyed by category (same shape as --plugins).
-  MEMOIZE_STALENESS    strict | claims | cosmetic-only.
+  MEMOIZE_STALENESS    strict | selective (default).
 `;
 }
 
