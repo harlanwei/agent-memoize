@@ -345,7 +345,7 @@ Recovery is automatic where it is safe:
 - A vanished source with no rename (or sources that match nothing) leaves the entry **suspended**: it needs agent attention, but is no longer stuck in perpetual staleness.
 - Cosmetic-only changes are reported in `cosmeticChanges` so nothing is hidden from the agent.
 
-Only entries whose `sources` intersect the changed files are touched. Updating one entry never clears staleness for another entry. Writes are atomic and guarded by a short-lived lock, so multiple agents can share the store safely. Config knob: `staleness` in `.agent-memoize/config.json` (or `MEMOIZE_STALENESS` env): `strict` | `claims` | `cosmetic-only`, default `claims`. `ignoreComments: true` additionally strips full-line comments per language when computing normalized hashes.
+Only entries whose `sources` intersect the changed files are touched. Updating one entry never clears staleness for another entry. Writes are atomic and guarded by a short-lived lock, so multiple agents can share the store safely. Config knob: `staleness` in `.agent-memoize/config.json` (or `MEMOIZE_STALENESS` env): `strict` | `claims` | `cosmetic-only`, default `claims`. `ignoreComments: true` additionally strips comments (per-language line and block comments, keeping the code around them) when computing normalized hashes.
 
 ## Development
 

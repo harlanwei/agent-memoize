@@ -344,7 +344,7 @@ summary: 认证流程在 src/auth/login.ts 中使用 JWT 中间件
 - 源文件消失且找不到重命名（或 sources 匹配不到任何文件）时，条目进入**挂起**状态：需要 agent 处理，但不会再永远卡在过期状态。
 - 仅有表面改动的变更会在 `cosmeticChanges` 中报告，任何变化都不会对 agent 隐瞒。
 
-只有 `sources` 与变更文件存在交集的条目才会被处理。更新某个条目绝不会清除其他条目的过期状态。写入是原子的，并由短生命周期锁保护，因此多个 agent 可以安全地共享记忆库。配置项：`.agent-memoize/config.json` 中的 `staleness`（或 `MEMOIZE_STALENESS` 环境变量）： `strict` | `claims` | `cosmetic-only`，默认 `claims`。`ignoreComments: true` 还会在计算规范化哈希时，按语言额外剥离整行注释。
+只有 `sources` 与变更文件存在交集的条目才会被处理。更新某个条目绝不会清除其他条目的过期状态。写入是原子的，并由短生命周期锁保护，因此多个 agent 可以安全地共享记忆库。配置项：`.agent-memoize/config.json` 中的 `staleness`（或 `MEMOIZE_STALENESS` 环境变量）： `strict` | `claims` | `cosmetic-only`，默认 `claims`。`ignoreComments: true` 还会在计算规范化哈希时，按语言剥离注释（行注释与块注释，并保留其周围的代码）。
 
 ## 开发
 

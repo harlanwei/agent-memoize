@@ -54,16 +54,17 @@ export function matchesAny(sources: string[], rel: string): boolean {
 
 /**
  * Whitespace-normalized copy: trailing whitespace stripped, blank lines dropped.
- * With ignoreComments, full-line comments are dropped per file extension
- * (line comments //, #, --, ; and block comments).
+ * With ignoreComments, comments are stripped per file extension (line comments
+ * //, #, --, ; and block comments). Code around a block marker is preserved —
+ * a semantic edit there must change the normalized hash, never count as
+ * cosmetic.
  */
 export function normalizeContent(text: string, opts: { ignoreComments: boolean; ext: string }): string {
   const out: string[] = [];
   const spec = opts.ignoreComments ? COMMENT_SPECS[opts.ext] : undefined;
   const blockState = { inBlock: false };
   for (const raw of text.split("\n")) {
-    const line = raw.replace(/\s+$/, "");
-    if (spec && isCommentLine(line, spec, blockState)) continue;
+    const line = (spec ? stripComments(raw, spec, blockState) : raw).replace(/\s+$/, "");
     if (line.trim() !== "") out.push(line);
   }
   return out.join("\n");
@@ -72,6 +73,56 @@ export function normalizeContent(text: string, opts: { ignoreComments: boolean; 
 interface CommentSpec {
   line?: string[];
   block?: [string, string];
+}
+
+/**
+ * Remove comments from a single line for normalized hashing, honoring string
+ * literals and a block-comment state carried across lines. Code before an
+ * opening block marker and after a closing one is kept; lines inside a
+ * multi-line block contribute nothing. A line comment is dropped only when it
+ * starts the trimmed line — a trailing comment stays in the hash, keeping the
+ * conservative behavior this layer always had.
+ */
+function stripComments(line: string, spec: CommentSpec, state: { inBlock: boolean }): string {
+  const block = spec.block;
+  let out = "";
+  let inStr: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inStr) {
+      out += ch;
+      if (ch === inStr && line[i - 1] !== "\\") inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      inStr = ch;
+      out += ch;
+      continue;
+    }
+    if (block) {
+      if (state.inBlock) {
+        const closeAt = line.indexOf(block[1], i);
+        if (closeAt < 0) return out; // rest of the line is inside the block
+        state.inBlock = false;
+        i = closeAt + block[1].length - 1;
+        continue;
+      }
+      if (line.startsWith(block[0], i)) {
+        const closeAt = line.indexOf(block[1], i + block[0].length);
+        if (closeAt < 0) {
+          state.inBlock = true; // block continues on later lines
+          return out;
+        }
+        i = closeAt + block[1].length - 1;
+        continue;
+      }
+    }
+    if (spec.line?.some((m) => line.startsWith(m, i))) {
+      return out.trim() === "" ? "" : out + line.slice(i);
+    }
+    out += ch;
+  }
+  return out;
 }
 
 const COMMENT_SPECS: Record<string, CommentSpec> = {
@@ -114,23 +165,6 @@ const COMMENT_SPECS: Record<string, CommentSpec> = {
   ".xml": { block: ["<!--", "-->"] },
   ".md": { block: ["<!--", "-->"] },
 };
-
-function isCommentLine(line: string, spec: CommentSpec, state: { inBlock: boolean }): boolean {
-  const t = line.trim();
-  if (spec.block) {
-    const [startSym, endSym] = spec.block;
-    if (state.inBlock) {
-      if (endSym && t.includes(endSym)) state.inBlock = false;
-      return true;
-    }
-    if (t.includes(startSym)) {
-      if (!t.slice(t.indexOf(startSym)).includes(endSym)) state.inBlock = true;
-      return true;
-    }
-  }
-  if (spec.line?.some((m) => t.startsWith(m))) return true;
-  return false;
-}
 
 // ---------- fingerprints ----------
 

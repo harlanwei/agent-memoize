@@ -77,6 +77,22 @@ describe("claim extraction", () => {
     expect(n).toBe("a\nb\n# not-a-comment");
   });
 
+  it("normalizeContent keeps code around block comments when ignoreComments is set", () => {
+    const n = normalizeContent(
+      "const y = 1; /* open\n   continues */\nfoo(y);\na /* c */ b\n/* pure */ code\n",
+      { ignoreComments: true, ext: ".js" },
+    );
+    expect(n).toBe("const y = 1;\nfoo(y);\na  b\n code");
+  });
+
+  it("normalizeContent ignores block markers inside string literals", () => {
+    const n = normalizeContent('const s = "/*";\nconst t = "*/";\ncode();\n', {
+      ignoreComments: true,
+      ext: ".ts",
+    });
+    expect(n).toBe('const s = "/*";\nconst t = "*/";\ncode();');
+  });
+
   it("extracts 3-character identifier tokens", () => {
     const tokens = extractTokens("The foo helper does work.");
     expect(tokens.has("foo")).toBe(true);
@@ -214,6 +230,49 @@ describe("staleness matrix (claims policy, default)", () => {
     expect(s.state).toBe("stale");
     expect(s.suspendedEntries).toContain("modules/auth");
     expect(s.deletedFiles).toContain("src/auth/login.ts");
+  });
+});
+
+describe("ignoreComments", () => {
+  const SRC = "const y = 1; /* open\n   continues */\nfoo(y);\n";
+
+  async function setup() {
+    const dir = await tmpDir();
+    await write(dir, ".agent-memoize/config.json", JSON.stringify({ ignoreComments: true }));
+    await write(dir, "src/a.ts", SRC);
+    await updateEntry(dir, {
+      name: "a",
+      kind: "file",
+      sources: ["src/a.ts"],
+      content: "The a module.",
+      author: "test",
+    });
+    await tick();
+    return dir;
+  }
+
+  it("treats a comment-only edit as cosmetic", async () => {
+    const dir = await setup();
+    await write(dir, "src/a.ts", "const y = 1; /* edited\n   continues */\nfoo(y);\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+    expect(s.cosmeticChanges).toContain("src/a.ts");
+  });
+
+  it("goes stale when code before an opening block comment changes", async () => {
+    const dir = await setup();
+    await write(dir, "src/a.ts", "const y = 999; /* open\n   continues */\nfoo(y);\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toContain("src/a.ts");
+  });
+
+  it("goes stale when code after a closing block comment changes", async () => {
+    const dir = await setup();
+    await write(dir, "src/a.ts", "const y = 1; /* open\n   continues */\nfoo(y, 2);\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toContain("src/a.ts");
   });
 });
 
