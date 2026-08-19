@@ -125,19 +125,32 @@ describe("Change A: normalized claim-line hashes", () => {
     expect(normalizeLine("foo()  ", ".ts")).toBe("foo()");
   });
 
-  it("normalizeLine strips trailing inline comments", () => {
-    expect(normalizeLine("const x = 1  // default", ".ts")).toBe("const x = 1");
-    expect(normalizeLine("x = 1 # py comment", ".py")).toBe("x = 1");
+  it("normalizeLine preserves whitespace inside quoted literals", () => {
+    expect(normalizeLine('const greeting = "hello  world";', ".ts")).not.toBe(
+      normalizeLine('const greeting = "hello world";', ".ts"),
+    );
   });
 
-  it("lineHash is stable across trailing-comment and whitespace edits", () => {
+  it("normalizeLine preserves leading whitespace in indentation-sensitive languages", () => {
+    expect(normalizeLine("    delete_user()", ".py")).not.toBe(
+      normalizeLine("delete_user()", ".py"),
+    );
+  });
+
+  it("normalizeLine strips trailing inline comments only when configured", () => {
+    expect(normalizeLine("const x = 1  // default", ".ts")).toContain("// default");
+    expect(normalizeLine("const x = 1  // default", ".ts", true)).toBe("const x = 1");
+    expect(normalizeLine("x = 1 # py comment", ".py", true)).toBe("x = 1");
+  });
+
+  it("lineHash is stable across configured comment and whitespace edits", () => {
     const base = lineHash("export function login(user, password) {", ".ts");
-    expect(lineHash("export function login(user, password) {  // entrypoint", ".ts")).toBe(base);
+    expect(lineHash("export function login(user, password) {  // entrypoint", ".ts", true)).toBe(base);
     expect(lineHash("export   function   login(user,  password)  {", ".ts")).toBe(base);
     expect(lineHash("export function login(user, password) {;", ".ts")).toBe(base);
   });
 
-  it("a claim line survives a trailing-comment edit (stays fresh/verified)", async () => {
+  it("a trailing-comment edit stales a claim when comments are significant", async () => {
     const dir = await tmpDir();
     // Single-line source with no block so the claim is line-level.
     await write(dir, "src/cfg.ts", "export const timeout = 5000;\n");
@@ -152,7 +165,58 @@ describe("Change A: normalized claim-line hashes", () => {
     // Add a trailing comment to the claimed line.
     await write(dir, "src/cfg.ts", "export const timeout = 5000; // ms\n");
     const s = await computeStatus(dir);
-    expect(s.state).toBe("fresh");
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/cfg.ts"]);
+  });
+
+  it("goes stale when whitespace inside a claimed string literal changes", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/greeting.ts", 'export const greeting = "hello  world";\n');
+    await updateEntry(dir, {
+      name: "greeting",
+      kind: "file",
+      sources: ["src/greeting.ts"],
+      content: "The greeting contains two spaces.",
+      author: "test",
+    });
+    await write(dir, "src/greeting.ts", 'export const greeting = "hello world";\n');
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/greeting.ts"]);
+  });
+
+  it("goes stale when a claimed Python line changes indentation", async () => {
+    const dir = await tmpDir();
+    await write(dir, "src/access.py", "if is_admin:\n    delete_user()\n");
+    await updateEntry(dir, {
+      name: "access",
+      kind: "file",
+      sources: ["src/access.py"],
+      content: "delete_user only runs when is_admin is true.",
+      author: "test",
+    });
+    await write(dir, "src/access.py", "if is_admin:\ndelete_user()\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["src/access.py"]);
+  });
+});
+
+describe("claim multiplicity", () => {
+  it("goes stale when one of two identical claimed lines changes", async () => {
+    const dir = await tmpDir();
+    await write(dir, "pipelines.yml", "standard:\n  - auth\nadmin:\n  - auth\n");
+    await updateEntry(dir, {
+      name: "pipelines",
+      kind: "file",
+      sources: ["pipelines.yml"],
+      content: "Both standard and admin pipelines include auth.",
+      author: "test",
+    });
+    await write(dir, "pipelines.yml", "standard:\n  - auth\nadmin:\n  - audit\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("stale");
+    expect(s.staleEntries[0].changedSources).toEqual(["pipelines.yml"]);
   });
 });
 
@@ -173,6 +237,7 @@ describe("staleness matrix (selective policy, default)", () => {
     let s = await computeStatus(dir);
     expect(s.state).toBe("fresh");
     expect(s.verifiedEntries).toContain("modules/auth");
+    expect(s.changedFiles).toContain("src/auth/login.ts");
     // Re-baselined: a second identical run no longer reports verified.
     s = await computeStatus(dir);
     expect(s.state).toBe("fresh");
@@ -199,7 +264,7 @@ describe("staleness matrix (selective policy, default)", () => {
     const s = await computeStatus(dir);
     expect(s.state).toBe("stale");
     expect(s.staleEntries[0].changedSources).toEqual(["src/auth/login.ts"]);
-    expect(s.changedFiles).toEqual(["src/auth/login.ts"]);
+    expect(s.changedFiles).toEqual(["src/auth/login.ts", "src/auth/other.ts"]);
   });
 
   it("recovers a renamed explicit source and updates the entry", async () => {
@@ -254,6 +319,44 @@ describe("ignoreComments", () => {
   it("treats a comment-only edit as cosmetic", async () => {
     const dir = await setup();
     await write(dir, "src/a.ts", "const y = 1; /* edited\n   continues */\nfoo(y);\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+    expect(s.cosmeticChanges).toContain("src/a.ts");
+  });
+
+  it("ignores a trailing inline-comment edit without claim coverage", async () => {
+    const dir = await tmpDir();
+    await write(dir, ".agent-memoize/config.json", JSON.stringify({ ignoreComments: true }));
+    await write(dir, "src/a.ts", "const y = 1; // old\n");
+    await updateEntry(dir, {
+      name: "overview",
+      kind: "file",
+      sources: ["src/a.ts"],
+      content: "Architecture overview.",
+      author: "test",
+    });
+    await write(dir, "src/a.ts", "const y = 1; // new\n");
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+    expect(s.cosmeticChanges).toContain("src/a.ts");
+  });
+
+  it("ignores comment edits inside a claimed block", async () => {
+    const dir = await tmpDir();
+    await write(dir, ".agent-memoize/config.json", JSON.stringify({ ignoreComments: true }));
+    await write(dir, "src/a.ts", "export function login() {\n  // old\n  return token;\n}\n");
+    await updateEntry(dir, {
+      name: "login",
+      kind: "file",
+      sources: ["src/a.ts"],
+      content: "login returns token.",
+      author: "test",
+    });
+    await write(
+      dir,
+      "src/a.ts",
+      "export function login() {\n  // replacement line one\n  // replacement line two\n  return token;\n}\n",
+    );
     const s = await computeStatus(dir);
     expect(s.state).toBe("fresh");
     expect(s.cosmeticChanges).toContain("src/a.ts");

@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { updateEntry } from "../src/service.js";
 import { computeStatusForRoot as computeStatus } from "../src/status.js";
-import { commitAll, gitRepo, tmpDir, write } from "./helpers.js";
+import { commitAll, gitRepo, sh, tmpDir, write } from "./helpers.js";
 
 const authEntry = {
   name: "modules/auth",
@@ -47,6 +47,20 @@ describe("git mode", () => {
     const s = await computeStatus(dir);
     expect(s.state).toBe("stale");
     expect(s.staleEntries.map((e) => e.name)).toContain("modules/auth");
+  });
+
+  it("recovers a staged rename of an explicit source", async () => {
+    const dir = await gitRepo();
+    await write(dir, "src/auth/login.ts", "export const login = true;\n");
+    await commitAll(dir);
+    await updateEntry(dir, { ...authEntry, sources: ["src/auth/login.ts"] });
+    await sh("git", ["mv", "src/auth/login.ts", "src/auth/sign-in.ts"], { cwd: dir });
+    const s = await computeStatus(dir);
+    expect(s.state).toBe("fresh");
+    expect(s.verifiedEntries).toContain("modules/auth");
+    expect(s.suspendedEntries).toEqual([]);
+    expect(s.deletedFiles).toContain("src/auth/login.ts");
+    expect(s.addedFiles).toContain("src/auth/sign-in.ts");
   });
 
   it("ignores changes to files outside every entry's sources", async () => {
@@ -108,15 +122,16 @@ describe("git mode", () => {
     expect(s.staleEntries.map((e) => e.name)).toEqual(["modules/auth-copy"]);
   });
 
-  it("marks an entry stale when a new file appears inside its sources glob", async () => {
+  it("reports and verifies an unrelated new file inside a sources glob", async () => {
     const dir = await gitRepo();
     await write(dir, "src/auth/login.ts", "login v1");
     await commitAll(dir);
     await updateEntry(dir, authEntry);
     await write(dir, "src/auth/session.ts", "new file"); // untracked
     const s = await computeStatus(dir);
-    expect(s.state).toBe("stale");
-    expect(s.changedFiles).toContain("src/auth/session.ts");
+    expect(s.state).toBe("fresh");
+    expect(s.verifiedEntries).toContain("modules/auth");
+    expect(s.addedFiles).toContain("src/auth/session.ts");
   });
 });
 

@@ -27,23 +27,24 @@ Automates the README install steps 1-3 for @naevic/agent-memoize:
   2. Configure your coding agent(s) as MCP clients
   3. Inject the agent-workflow prompt into AGENTS.md / CLAUDE.md and, on
      request, the global agent prompts (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
-     ~/.config/opencode/AGENTS.md, ~/.kimi-code/AGENTS.md, ~/.zcode/AGENTS.md)
+     ~/.config/opencode/AGENTS.md, ~/.pi/agent/AGENTS.md,
+     ~/.kimi-code/AGENTS.md, ~/.zcode/AGENTS.md)
 
 Options:
   --local          Dev mode: configure agents to run this checkout
                    (node dist/index.js) instead of the npm package; skips the
                    global install and builds dist/ if it is missing
-  --agent <list>   Only configure the listed agents (comma-separated; no
-                   detection or per-agent prompts):
+  --agent <list>   Only configure the listed agents (comma-separated; skips
+                   detection and agent-selection prompts):
                    claude,codex,opencode,pi,kimi,zcode
   --yes            Approve every prompt automatically (dependency installs,
                    config writes)
   -h, --help       Show this help
 
-Project-scope files (.mcp.json, opencode.json, .kimi-code/mcp.json,
-.zcode/config.json, AGENTS.md) are written in the directory you run the script
-from; Codex's config is ~/.codex/config.toml. Existing files are backed up to
-*.bak before being edited.
+MCP client configuration is written at user scope so the server is available
+in every project. The optional project workflow prompt is written in the
+directory you run the script from. Existing files are backed up to *.bak
+before being edited.
 EOF
   exit 0
 }
@@ -288,8 +289,8 @@ fi
 
 step 2 "configure your coding agent(s) as MCP clients"
 
-setup_claude() {   # Claude Code -> .mcp.json (project scope)
-  local file="$PROJECT_ROOT/.mcp.json"
+setup_claude() {   # Claude Code -> ~/.claude.json (user scope)
+  local file="$HOME/.claude.json"
   backup_file "$file"
   json_merge "$file" "mcpServers.agent-memoize" "$SERVER_ENTRY_JSON"
   json_validate "$file"
@@ -312,41 +313,44 @@ setup_codex() {    # Codex -> ~/.codex/config.toml (user scope)
   info "  Codex: $file"
 }
 
-setup_opencode() { # OpenCode -> opencode.json (project scope)
-  local file="$PROJECT_ROOT/opencode.json"
+setup_opencode() { # OpenCode -> ~/.config/opencode/opencode.json (user scope)
+  local file="$HOME/.config/opencode/opencode.json"
+  mkdir -p "$HOME/.config/opencode"
   backup_file "$file"
-  json_merge "$file" "mcp.servers.agent-memoize" "{\"type\":\"local\",\"command\":$OPENCODE_COMMAND_JSON}"
+  json_merge "$file" "mcp.agent-memoize" "{\"type\":\"local\",\"command\":$OPENCODE_COMMAND_JSON}"
   json_validate "$file"
   info "  OpenCode: $file"
 }
 
-setup_pi() {       # Pi -> pi-mcp-adapter + .mcp.json (project scope)
-  if confirm "Pi needs the 'pi-mcp-adapter' extension. Install it now (pi install npm:pi-mcp-adapter)?"; then
+setup_pi() {       # Pi -> pi-mcp-adapter + shared user-global MCP config
+  if [ -n "$AGENT_FILTER" ] || confirm "Pi needs the 'pi-mcp-adapter' extension. Install it now (pi install npm:pi-mcp-adapter)?"; then
     if ! pi install npm:pi-mcp-adapter; then
       warn "pi-mcp-adapter install failed — run 'pi install npm:pi-mcp-adapter' later; Pi will not load MCP servers without it."
     fi
   else
     warn "Skipping pi-mcp-adapter; Pi will not load MCP servers without it."
   fi
-  local file="$PROJECT_ROOT/.mcp.json"
+  local file="$HOME/.config/mcp/mcp.json"
+  mkdir -p "$HOME/.config/mcp"
   backup_file "$file"
   json_merge "$file" "mcpServers.agent-memoize" "$SERVER_ENTRY_JSON"
   json_validate "$file"
   info "  Pi: $file"
 }
 
-setup_kimi() {     # Kimi Code -> .kimi-code/mcp.json (project scope)
-  local file="$PROJECT_ROOT/.kimi-code/mcp.json"
-  mkdir -p "$PROJECT_ROOT/.kimi-code"
+setup_kimi() {     # Kimi Code -> user-level mcp.json
+  local dir="${KIMI_CODE_HOME:-$HOME/.kimi-code}" file
+  file="$dir/mcp.json"
+  mkdir -p "$dir"
   backup_file "$file"
   json_merge "$file" "mcpServers.agent-memoize" "$SERVER_ENTRY_JSON"
   json_validate "$file"
   info "  Kimi Code: $file"
 }
 
-setup_zcode() {    # ZCode -> .zcode/config.json (project scope; mcp.servers nesting)
-  local file="$PROJECT_ROOT/.zcode/config.json"
-  mkdir -p "$PROJECT_ROOT/.zcode"
+setup_zcode() {    # ZCode -> ~/.zcode/cli/config.json (user scope; mcp.servers nesting)
+  local file="$HOME/.zcode/cli/config.json"
+  mkdir -p "$HOME/.zcode/cli"
   backup_file "$file"
   json_merge "$file" "mcp.servers.agent-memoize" "$SERVER_ENTRY_JSON"
   json_validate "$file"
@@ -393,7 +397,7 @@ done
 step 3 "inform your coding agent about the workflow"
 
 # The server CLI owns the prompt text: `--inject` writes it to the current
-# project (AGENTS.md, plus CLAUDE.md when present); `--inject --global` writes
+# project (AGENTS.md and CLAUDE.md); `--inject global:<agent>` writes
 # it to the global agent prompts.
 if [ "$LOCAL_MODE" -eq 1 ]; then
   INJECT_CMD=(node "$SERVER_JS")
@@ -411,8 +415,10 @@ run_inject() {
   return 0
 }
 
-if confirm "Add the agent workflow block to AGENTS.md and CLAUDE.md (created if missing)?"; then
-  run_inject --inject || true
+if [ -z "$AGENT_FILTER" ]; then
+  if confirm "Also add the workflow block to this project's AGENTS.md and CLAUDE.md?"; then
+    run_inject --inject || true
+  fi
 fi
 
 # Global prompts: one file per agent, in the user's home directory.
@@ -422,12 +428,13 @@ for a in $CONFIGURED; do
     claude)   rel=".claude/CLAUDE.md" ;;
     codex)    rel=".codex/AGENTS.md" ;;
     opencode) rel=".config/opencode/AGENTS.md" ;;
+    pi)       rel=".pi/agent/AGENTS.md" ;;
     kimi)     rel=".kimi-code/AGENTS.md" ;;
     zcode)    rel=".zcode/AGENTS.md" ;;
     *) warn "No global prompt file known for $a (skipped)." ;;
   esac
   [ -n "$rel" ] || continue
-  if confirm "Inject the workflow prompt into the global prompts for $a (~/$rel)?"; then
+  if [ -n "$AGENT_FILTER" ] || confirm "Inject the workflow prompt into the global prompts for $a (~/$rel)?"; then
     run_inject --inject "global:$a" || true
   fi
 done

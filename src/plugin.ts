@@ -73,12 +73,17 @@ export interface BasePlugin {
   shutdown?(): Promise<void>;
 }
 
-/** Produces and normalizes the raw input that becomes a memory. */
+/**
+ * Source of truth for memories. A producer generates the truth a memory is
+ * written from, or tells the main agent how to generate it (e.g. by spawning
+ * a subagent). It may also register MCP tools that analyze the project (such
+ * as LSP-backed tools) and return that truth to the agent.
+ */
 export interface ProducerPlugin extends BasePlugin {
   type: "producer";
-  /** Normalize/validate raw update input; return null to reject it. */
+  /** Normalize the truth submitted in an update; return null to reject it. */
   processUpdate?(args: UpdateArgs): Promise<UpdateArgs | null>;
-  /** Text appended to the memoize_update tool description. */
+  /** Guidance appended to the memoize_update tool description: how to produce the truth for an update. */
   describeUpdate?(): string;
   /** Lint sources at update time; returned strings become warnings. */
   lintSources?(root: string, sources: string[], matched: string[]): Promise<string[]> | string[];

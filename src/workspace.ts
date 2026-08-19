@@ -12,9 +12,9 @@ export function storePath(root: string): string {
 
 const NAME_RE = /^[a-z0-9][a-z0-9/_-]*$/;
 
-/** Entry names: lowercase segments, no dots — also makes traversal impossible. */
+/** Entry names: non-empty lowercase segments, no dots — also makes traversal impossible. */
 export function isValidName(name: string): boolean {
-  return NAME_RE.test(name) && !name.split("/").includes("..");
+  return NAME_RE.test(name) && name.split("/").every((segment) => segment.length > 0);
 }
 
 // ---------- trees & globs ----------
@@ -79,9 +79,8 @@ interface CommentSpec {
  * Remove comments from a single line for normalized hashing, honoring string
  * literals and a block-comment state carried across lines. Code before an
  * opening block marker and after a closing one is kept; lines inside a
- * multi-line block contribute nothing. A line comment is dropped only when it
- * starts the trimmed line — a trailing comment stays in the hash, keeping the
- * conservative behavior this layer always had.
+ * multi-line block contribute nothing. Line comments are dropped whether they
+ * occupy the whole line or trail code.
  */
 function stripComments(line: string, spec: CommentSpec, state: { inBlock: boolean }): string {
   const block = spec.block;
@@ -117,9 +116,7 @@ function stripComments(line: string, spec: CommentSpec, state: { inBlock: boolea
         continue;
       }
     }
-    if (spec.line?.some((m) => line.startsWith(m, i))) {
-      return out.trim() === "" ? "" : out + line.slice(i);
-    }
+    if (spec.line?.some((m) => line.startsWith(m, i))) return out;
     out += ch;
   }
   return out;
@@ -309,6 +306,7 @@ export async function entryReferencesFile(
   root: string,
   rel: string,
   text: string,
+  ignoreComments = false,
 ): Promise<boolean> {
   const tokens = extractTokens(text);
   if (tokens.size === 0) return false;
@@ -317,6 +315,9 @@ export async function entryReferencesFile(
     content = await fs.readFile(path.join(root, rel), "utf8");
   } catch {
     return false;
+  }
+  if (ignoreComments) {
+    content = normalizeContent(content, { ignoreComments: true, ext: path.extname(rel) });
   }
   const { wordRe, paths } = buildTokenMatcher(tokens);
   if (paths.some((p) => content.includes(p))) return true;
@@ -349,25 +350,97 @@ function stripInlineComment(line: string, spec: CommentSpec | undefined): string
   return line;
 }
 
+/** Languages/formats where leading whitespace participates in program structure. */
+const INDENT_SENSITIVE_EXTS = new Set([
+  ".coffee",
+  ".fs",
+  ".fsx",
+  ".gd",
+  ".hs",
+  ".md",
+  ".nim",
+  ".pug",
+  ".py",
+  ".pyi",
+  ".sass",
+  ".styl",
+  ".yaml",
+  ".yml",
+]);
+
 /**
- * Normalize a single line for stable hashing: collapse internal whitespace
- * runs to one space, strip trailing whitespace, drop trailing inline comments
- * (per file extension), and strip a single trailing incidental semicolon.
- * Whitespace/comment/semicolon-only edits no longer break a claim line.
+ * Collapse whitespace outside quoted literals while preserving literal contents.
+ * This keeps formatting-only edits stable without equating different runtime
+ * strings such as `"hello  world"` and `"hello world"`.
  */
-export function normalizeLine(line: string, ext?: string): string {
+function collapseCodeWhitespace(line: string): string {
+  let out = "";
+  let pendingSpace = false;
+  let inString: string | null = null;
+  let escaped = false;
+  for (const ch of line) {
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === inString) {
+        inString = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      if (pendingSpace && out.length > 0) out += " ";
+      pendingSpace = false;
+      inString = ch;
+      out += ch;
+    } else if (/\s/.test(ch)) {
+      pendingSpace = true;
+    } else {
+      if (pendingSpace && out.length > 0) out += " ";
+      pendingSpace = false;
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/**
+ * Normalize a single line for stable hashing: preserve semantic whitespace
+ * (quoted literals and indentation-sensitive leading whitespace), collapse
+ * formatting whitespace elsewhere, drop trailing inline comments (per file
+ * extension), and strip a single trailing incidental semicolon.
+ */
+export function normalizeLine(line: string, ext?: string, ignoreComments = false): string {
   const spec = ext ? COMMENT_SPECS[ext] : undefined;
-  let l = line.replace(/\s+/g, " ").trim();
-  if (spec) l = stripInlineComment(l, spec).trim();
+  let l = ignoreComments && spec ? stripInlineComment(line, spec) : line;
+  l = l.trimEnd();
+  const indentation = ext && INDENT_SENSITIVE_EXTS.has(ext) ? l.match(/^[ \t]*/)![0] : "";
+  l = indentation + collapseCodeWhitespace(l.slice(indentation.length));
   // A trailing semicolon is incidental for most languages; stripping it keeps
   // `x` and `x;` hash-equal. Only one is stripped to avoid mangling `;;`-style syntax.
   if (l.endsWith(";")) l = l.slice(0, -1).trimEnd();
   return l;
 }
 
-/** Hash a normalized line (hashVersion 2). */
-export function lineHash(line: string, ext?: string): string {
-  return createHash("sha256").update(normalizeLine(line, ext)).digest("hex");
+/** Normalize lines with comment state carried across the whole region. */
+function normalizeClaimLines(lines: string[], ext?: string, ignoreComments = false): string[] {
+  const spec = ignoreComments && ext ? COMMENT_SPECS[ext] : undefined;
+  const blockState = { inBlock: false };
+  return lines.map((line) => {
+    const uncommented = spec ? stripComments(line, spec, blockState) : line;
+    return normalizeLine(uncommented, ext, false);
+  });
+}
+
+function normalizedLineHash(line: string): string {
+  return createHash("sha256").update(line).digest("hex");
+}
+
+/** Hash a semantic-whitespace-preserving normalized line (hashVersion 3). */
+export function lineHash(line: string, ext?: string, ignoreComments = false): string {
+  return normalizedLineHash(normalizeClaimLines([line], ext, ignoreComments)[0]);
 }
 
 /** Legacy single-line hash (hashVersion 1): trailing whitespace stripped only. */
@@ -375,10 +448,14 @@ function legacyLineHash(line: string): string {
   return createHash("sha256").update(line.replace(/\s+$/, "")).digest("hex");
 }
 
-/** Hash a normalized multi-line block (lines joined with "\n") for hashVersion 2. */
-function blockHash(lines: string[], ext?: string): string {
+/** Hash a normalized multi-line block (lines joined with "\n") for hashVersion 3. */
+function blockHash(lines: string[], ext?: string, ignoreComments = false): string {
   return createHash("sha256")
-    .update(lines.map((l) => normalizeLine(l, ext)).join("\n"))
+    .update(
+      normalizeClaimLines(lines, ext, ignoreComments)
+        .filter((line) => line.trim() !== "")
+        .join("\n"),
+    )
     .digest("hex");
 }
 
@@ -459,13 +536,14 @@ function findBlockEnd(lines: string[], startIdx: number, ext?: string): number {
  * spanning the block; otherwise a single-line claim. A block claim stays intact
  * as long as its exact normalized content still appears as a contiguous run
  * somewhere in the file (it may have moved). Empty when no token appears in the
- * file (caller falls back to whole-file checks). All hashes are hashVersion 2.
+ * file (caller falls back to whole-file checks). All hashes are hashVersion 3.
  */
 export async function claimLines(
   root: string,
   rel: string,
   text: string,
   cap = 50,
+  ignoreComments = false,
 ): Promise<ClaimRegion[]> {
   const tokens = extractTokens(text);
   if (tokens.size === 0) return [];
@@ -477,6 +555,7 @@ export async function claimLines(
   }
   const ext = path.extname(rel);
   const lines = content.split("\n");
+  const normalizedLines = normalizeClaimLines(lines, ext, ignoreComments);
   const { wordRe, paths } = buildTokenMatcher(tokens);
   const lineMatches = (line: string): boolean => {
     if (paths.some((p) => line.includes(p))) return true;
@@ -485,7 +564,7 @@ export async function claimLines(
   const out: ClaimRegion[] = [];
   const claimedLines = new Set<number>();
   for (let i = 0; i < lines.length && out.length < cap; i++) {
-    if (!lineMatches(lines[i])) continue;
+    if (!lineMatches(ignoreComments ? normalizedLines[i] : lines[i])) continue;
     const endIdx = findBlockEnd(lines, i, ext);
     if (endIdx > i) {
       const blockLines = lines.slice(i, endIdx + 1);
@@ -494,43 +573,58 @@ export async function claimLines(
         line: i + 1,
         end: endIdx + 1,
         kind: "block",
-        hash: blockHash(blockLines, ext),
-        hashVersion: 2,
+        hash: blockHash(blockLines, ext, ignoreComments),
+        hashVersion: 3,
       });
     } else {
-      out.push({ line: i + 1, hash: lineHash(lines[i], ext), hashVersion: 2 });
+      out.push({ line: i + 1, hash: normalizedLineHash(normalizedLines[i]), hashVersion: 3 });
     }
   }
   return out;
 }
 
-/**
- * Multiset of every line hash (both legacy v1 and normalized v2) for the
- * current file content, so a stored claim hash matches regardless of which
- * hashVersion it was captured under.
- */
-function currentLineHashes(lines: string[], ext?: string): Map<string, number> {
-  const present = new Map<string, number>();
-  for (const line of lines) {
-    // Compute both; cost is negligible relative to the file read.
-    const inc = (h: string) => present.set(h, (present.get(h) ?? 0) + 1);
-    inc(legacyLineHash(line));
-    inc(lineHash(line, ext));
+/** Multisets of current line hashes, kept separate by hash version. */
+function currentLineHashes(
+  lines: string[],
+  ext?: string,
+  ignoreComments = false,
+): { legacy: Map<string, number>; normalized: Map<string, number> } {
+  const legacy = new Map<string, number>();
+  const normalized = new Map<string, number>();
+  const inc = (map: Map<string, number>, hash: string) =>
+    map.set(hash, (map.get(hash) ?? 0) + 1);
+  const normalizedLines = normalizeClaimLines(lines, ext, ignoreComments);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    inc(legacy, legacyLineHash(line));
+    inc(normalized, normalizedLineHash(normalizedLines[i]));
   }
-  return present;
+  return { legacy, normalized };
+}
+
+/** Consume one occurrence from a hash multiset. */
+function consumeHash(present: Map<string, number>, hash: string): boolean {
+  const count = present.get(hash) ?? 0;
+  if (count === 0) return false;
+  if (count === 1) present.delete(hash);
+  else present.set(hash, count - 1);
+  return true;
 }
 
 /**
  * Claim regions whose hashes are no longer present in the current file content.
- * Single-line claims match on their stored hash (both v1 legacy and v2
- * normalized hashes are precomputed for the current file). Block claims are
- * position-independent: their composite hash must reproduce from some
- * contiguous run of lines anywhere in the file (see blockHashExists).
+ * Single-line claims match on their stored hash (v1 legacy and v3 normalized
+ * hashes are precomputed for the current file). Unsafe v2 claims are treated
+ * conservatively after a substantive source change. Matches consume
+ * occurrences, so two identical claims require two current occurrences.
+ * Block claims are position-independent: their composite hash must reproduce
+ * from a contiguous run of lines, with duplicate runs counted separately.
  */
 export async function findBrokenClaims(
   root: string,
   rel: string,
   claims: ClaimRegion[],
+  ignoreComments = false,
 ): Promise<ClaimRegion[]> {
   if (claims.length === 0) return [];
   let content;
@@ -541,33 +635,29 @@ export async function findBrokenClaims(
   }
   const ext = path.extname(rel);
   const lines = content.split("\n");
-  const present = currentLineHashes(lines, ext);
+  const present = currentLineHashes(lines, ext, ignoreComments);
+  const blockCounts = new Map<string, number>();
+  for (let i = 0; i < lines.length; i++) {
+    const end = findBlockEnd(lines, i, ext);
+    if (end <= i) continue;
+    const hash = blockHash(lines.slice(i, end + 1), ext, ignoreComments);
+    blockCounts.set(hash, (blockCounts.get(hash) ?? 0) + 1);
+  }
   const broken: ClaimRegion[] = [];
   for (const c of claims) {
-    if (c.kind === "block" && c.end && c.hashVersion === 2) {
-      // Block claims are verified position-independently by content (see blockHashExists).
-      if (blockHashExists(lines, c, ext)) continue;
+    // Version 2 erased semantic whitespace and cannot safely prove a changed
+    // source still supports the claim. Conservatively stale it once; the next
+    // memoize_update records a version-3 baseline.
+    if (c.hashVersion === 2) {
       broken.push(c);
+    } else if (c.kind === "block" && c.end && c.hashVersion === 3) {
+      if (!consumeHash(blockCounts, c.hash)) broken.push(c);
     } else {
-      if (!present.has(c.hash)) broken.push(c);
+      const hashes = c.hashVersion === 3 ? present.normalized : present.legacy;
+      if (!consumeHash(hashes, c.hash)) broken.push(c);
     }
   }
   return broken;
-}
-
-/**
- * A block claim is intact when its stored composite hash can be reproduced from
- * some contiguous run of lines (of the original span length) anywhere in the
- * current file. This makes the check position-independent — the block may have
- * moved — while still requiring the block's exact normalized content (as a
- * unit) to be present. Reordering lines within the block is treated as a change.
- */
-function blockHashExists(lines: string[], c: ClaimRegion, ext?: string): boolean {
-  const span = c.end! - c.line + 1;
-  for (let i = 0; i + span <= lines.length; i++) {
-    if (blockHash(lines.slice(i, i + span), ext) === c.hash) return true;
-  }
-  return false;
 }
 
 /** True when every claim region still exists somewhere in the file. */
@@ -575,8 +665,9 @@ export async function claimsIntact(
   root: string,
   rel: string,
   claims: ClaimRegion[],
+  ignoreComments = false,
 ): Promise<boolean> {
-  return (await findBrokenClaims(root, rel, claims)).length === 0;
+  return (await findBrokenClaims(root, rel, claims, ignoreComments)).length === 0;
 }
 
 // ---------- rename recovery (Layer 3) ----------

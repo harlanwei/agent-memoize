@@ -451,7 +451,15 @@ describe("ordering and lifecycle", () => {
 });
 
 describe("producer, writer and filter plugins", () => {
-  it("datasource processUpdate can transform and reject input", async () => {
+  it("agent-producer describes itself as a source of truth that spawns a subagent", () => {
+    const producer = createAgentDs();
+    const description = producer.describeUpdate?.() ?? "";
+    expect(description).toContain("Source of truth");
+    expect(description).toContain("spawn a subagent");
+    expect(description).toContain("explore the project around this entry's topic");
+  });
+
+  it("producer processUpdate can transform and reject input", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");
     const ds = {

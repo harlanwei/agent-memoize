@@ -163,7 +163,7 @@ for (const f of registry.writers.slice(1)) {
 }
 for (const ds of registry.producers) {
   const t = ds.describeUpdate?.();
-  if (t) promptSections.push(`## Data source (${ds.id})\n${t}`);
+  if (t) promptSections.push(`## Source of truth (${ds.id})\n${t}`);
 }
 const updateExtras = promptSections.length > 0 ? `\n\n${promptSections.join("\n\n")}` : "";
 

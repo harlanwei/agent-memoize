@@ -35,6 +35,18 @@ describe("updateEntry validation", () => {
     });
     expect(r.warning).toMatch(/matched no files/);
   });
+
+  it("rejects empty name segments that would alias another entry", async () => {
+    const dir = await tmpDir();
+    await updateEntry(dir, { ...decision, name: "foo", content: "original" });
+    await expect(
+      updateEntry(dir, { ...decision, name: "foo/", content: "replacement" }),
+    ).rejects.toThrow(/invalid entry name/);
+    await expect(
+      updateEntry(dir, { ...decision, name: "foo//bar", content: "replacement" }),
+    ).rejects.toThrow(/invalid entry name/);
+    expect((await recall(dir, "foo") as any).content).toContain("original");
+  });
 });
 
 describe("recall", () => {

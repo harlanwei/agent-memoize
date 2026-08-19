@@ -164,6 +164,21 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic);
     }
 
+    // Dirty-set changes don't encode whether a path was added or deleted.
+    // Resolve relevant paths against the entry baseline so worktree renames
+    // follow the same delete+add recovery path as committed renames.
+    for (const p of [...ec]) {
+      if (!matchesAny(e.sources, p)) continue;
+      const current = await fingerprint(root, p, null);
+      if (!current) {
+        ec.delete(p);
+        ed.add(p);
+      } else if (base && !(p in base.files)) {
+        ec.delete(p);
+        ea.add(p);
+      }
+    }
+
     // Claim-scoped triage per hit file.
     const entryStaleSources: string[] = [];
     const entryBrokenClaims: { path: string; line: number; end?: number; kind?: "line" | "block" }[] = [];
@@ -173,6 +188,7 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
 
     for (const p of hitsOf(ec, ea, ed, e.sources)) {
       if (ea.has(p)) {
+        added.add(p);
         // A new file inside the sources glob. Under "strict" this always stales.
         // Under claim-aware policies, an unrelated new file (one the entry's text
         // doesn't reference) only re-baselines coverage — it doesn't break any
@@ -180,7 +196,7 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         // the file is unrelated, so surface it to preserve the safety property.
         if (normalized(ctx)) {
           const text = e.content + "\n" + e.summary;
-          const referenced = await entryReferencesFile(root, p, text);
+          const referenced = await entryReferencesFile(root, p, text, ctx.ignoreComments);
           if (referenced) {
             entryStaleSources.push(p);
           } else if (extractTokens(text).size === 0) {
@@ -188,7 +204,6 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
             entryStaleSources.push(p);
           } else {
             // Unrelated new file: refresh coverage without invalidating claims.
-            added.add(p);
             needsRebaseline = true;
           }
         } else {
@@ -197,11 +212,13 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         continue;
       }
       if (ed.has(p)) {
+        deleted.add(p);
         if (e.sources.includes(p)) {
           // Explicit-path source vanished: look for a rename (same content elsewhere).
           const to = await findRename(root, p, base?.files[p], tree);
           if (to) {
             renames.push({ from: p, to });
+            added.add(to);
             needsRebaseline = true;
             continue;
           }
@@ -212,16 +229,20 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       }
       // Changed file: cosmetic → fresh; claim lines intact → re-baseline;
       // claim line broken (or no claims) → stale.
-      if (base?.files[p]?.norm) {
-        const c = await classifyChange(root, p, base.files[p], ctx.ignoreComments);
-        if (c === "cosmetic") {
-          cosmetic.add(p);
-          continue;
-        }
+      const classification = await classifyChange(root, p, base?.files[p], ctx.ignoreComments);
+      if (classification === "unchanged") {
+        needsRebaseline = true;
+        continue;
       }
+      if (classification === "cosmetic") {
+        cosmetic.add(p);
+        needsRebaseline = true;
+        continue;
+      }
+      changed.add(p);
       const claims = base?.claims?.[p];
       if (claims && claims.length > 0) {
-        const broken = await findBrokenClaims(root, p, claims);
+        const broken = await findBrokenClaims(root, p, claims, ctx.ignoreComments);
         if (broken.length === 0) {
           needsRebaseline = true;
           continue;
@@ -242,11 +263,6 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
     }
 
     if (entryStaleSources.length > 0) {
-      for (const p of entryStaleSources) {
-        if (ea.has(p)) added.add(p);
-        else if (ed.has(p)) deleted.add(p);
-        else changed.add(p);
-      }
       const onlyUnrecoveredDeletes =
         unrecoveredDelete && entryStaleSources.every((p) => ed.has(p));
       if (onlyUnrecoveredDeletes) {
@@ -314,7 +330,8 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
   }
 
   const sortCap = (s: Set<string>) => [...s].sort().slice(0, CAP);
-  const truncated = changed.size > CAP || added.size > CAP || deleted.size > CAP;
+  const truncated =
+    changed.size > CAP || added.size > CAP || deleted.size > CAP || cosmetic.size > CAP;
   return {
     state: stale.length > 0 || invalid.length > 0 || suspended.length > 0 ? "stale" : "fresh",
     mode,
@@ -355,7 +372,15 @@ async function rebuildBaseline(
     const fp = await fingerprint(ctx.root, p, norm);
     if (fp) {
       files[p] = fp;
-      if (norm) claims[p] = await claimLines(ctx.root, p, e.content + "\n" + e.summary);
+      if (norm) {
+        claims[p] = await claimLines(
+          ctx.root,
+          p,
+          e.content + "\n" + e.summary,
+          50,
+          ctx.ignoreComments,
+        );
+      }
     }
   }
   return {

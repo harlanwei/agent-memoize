@@ -1,3 +1,5 @@
+English | [中文](deciding-staleness.zh-cn.md)
+
 ## How staleness is decided
 
 Each entry carries a baseline in `manifest.json`: the git state (HEAD + dirty files), the
@@ -14,10 +16,14 @@ workspace, per entry:
 
 Then the **staleness policy** decides what counts as stale:
 
-| Policy | Cosmetic edits (whitespace/comments) | Non-claim edits | Claim-line edits | New files in `sources` |
-| --- | --- | --- | --- | --- |
-| `strict` | stale | stale | stale | stale |
-| `selective` (default) | fresh | auto re-baselined (`verified`) | **stale** | stale when referenced, else re-baselined |
+| Policy | Whitespace-only edits | Comment edits | Non-claim edits | Claim-line edits | New files in `sources` |
+| --- | --- | --- | --- | --- | --- |
+| `strict` | stale | stale | stale | stale | stale |
+| `selective` (default) | fresh | considered when `ignoreComments=false`; ignored when `true` | auto re-baselined (`verified`) | **stale** | stale when referenced, else re-baselined |
+
+With `ignoreComments=false`, a comment edit inside a claim region is a claim edit; a
+comment outside claim coverage remains a non-claim edit. With `ignoreComments=true`,
+line and block comments are removed before both whole-file and claim-region comparison.
 
 A **claim line** is a line of a source file that the entry text references; staleness is judged
 on claim lines only, and the check is position-independent (inserting or removing lines

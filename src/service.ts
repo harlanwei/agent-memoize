@@ -70,8 +70,12 @@ function statusContextFor(ctx: ServiceContext, db: LedgerPlugin): StatusContext 
 /** Merge per-ledger status results: union everything; stale if any ledger is stale. */
 function mergeStatus(results: StatusResult[]): StatusResult {
   const first = results[0]!;
-  const union = (key: "changedFiles" | "addedFiles" | "deletedFiles" | "cosmeticChanges") =>
-    [...new Set(results.flatMap((r) => r[key]))].sort().slice(0, STATUS_CAP);
+  let mergeTruncated = false;
+  const union = (key: "changedFiles" | "addedFiles" | "deletedFiles" | "cosmeticChanges") => {
+    const values = [...new Set(results.flatMap((r) => r[key]))].sort();
+    if (values.length > STATUS_CAP) mergeTruncated = true;
+    return values.slice(0, STATUS_CAP);
+  };
   const unionNames = (key: "verifiedEntries" | "suspendedEntries" | "invalidEntries") =>
     [...new Set(results.flatMap((r) => r[key]))].sort();
   const stale = new Map<string, StaleEntry>();
@@ -95,7 +99,7 @@ function mergeStatus(results: StatusResult[]): StatusResult {
     suspendedEntries: unionNames("suspendedEntries"),
     staleEntries: [...stale.values()],
     invalidEntries: unionNames("invalidEntries"),
-    truncated: results.some((r) => r.truncated),
+    truncated: mergeTruncated || results.some((r) => r.truncated),
   };
 }
 
@@ -160,7 +164,15 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
     const fp = await fingerprint(root, p, norm);
     if (fp) {
       files[p] = fp;
-      if (norm) claims[p] = await claimLines(root, p, content + "\n" + (current.summary ?? ""));
+      if (norm) {
+        claims[p] = await claimLines(
+          root,
+          p,
+          content + "\n" + (current.summary ?? ""),
+          50,
+          registry.ignoreComments,
+        );
+      }
     }
   }
 

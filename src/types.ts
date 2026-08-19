@@ -52,8 +52,11 @@ export interface ClaimRegion {
   kind?: "line" | "block";
   /** sha256 of the normalized region content. */
   hash: string;
-  /** 1 = legacy (trailing-whitespace strip only); 2 = normalized line/block hash. */
-  hashVersion?: 1 | 2;
+  /**
+   * 1 = legacy (trailing-whitespace strip only); 2 = syntax-insensitive
+   * normalization; 3 = normalization that preserves semantic whitespace.
+   */
+  hashVersion?: 1 | 2 | 3;
 }
 
 /**
@@ -100,6 +103,6 @@ export interface StatusResult {
   staleEntries: StaleEntry[];
   /** Entry files that failed to parse. */
   invalidEntries: string[];
-  /** True when any output array was capped. */
+  /** True when a file-change output array was capped. */
   truncated: boolean;
 }
