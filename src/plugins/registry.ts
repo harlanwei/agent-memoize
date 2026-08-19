@@ -136,7 +136,6 @@ export class Registry {
     // category it is configured under. Ledgers keep their group structure;
     // within each category (and within each group), config order is
     // preserved: if A is listed before B, A runs first.
-    const loaded = new Map<string, BasePlugin>();
     const cfgByPlugin = new Map<BasePlugin, PluginConfig>();
     const loadCfg = async (type: PluginType, cfg: PluginConfig): Promise<BasePlugin> => {
       const p = await loadOne(cfg.id, cfg.options ?? {}, loader);
@@ -145,9 +144,16 @@ export class Registry {
           `plugin "${cfg.id}" declares type "${p.type}" but is configured under "${type}"`,
         );
       }
-      loaded.set(cfg.id, p);
       cfgByPlugin.set(p, cfg);
       return p;
+    };
+    const loadCategory = async <P extends BasePlugin>(
+      type: PluginType,
+      configs: PluginConfig[] = [],
+    ): Promise<P[]> => {
+      const out: P[] = [];
+      for (const cfg of configs) out.push(await loadCfg(type, cfg) as P);
+      return out;
     };
 
     const ledgerGroups: LedgerPlugin[][] = [];
@@ -164,31 +170,11 @@ export class Registry {
     }
     registry.primaryDb = registry.ledgers[0];
 
-    const producers: ProducerPlugin[] = [];
-    for (const cfg of plugins.producers ?? []) {
-      producers.push((await loadCfg("producer", cfg)) as ProducerPlugin);
-    }
-    registry.producers = producers;
-    const writers: WriterPlugin[] = [];
-    for (const cfg of plugins.writers ?? []) {
-      writers.push((await loadCfg("writer", cfg)) as WriterPlugin);
-    }
-    registry.writers = writers;
-    const filters: FilterPlugin[] = [];
-    for (const cfg of plugins.filters ?? []) {
-      filters.push((await loadCfg("filter", cfg)) as FilterPlugin);
-    }
-    registry.filters = filters;
-    const organizers: OrganizerPlugin[] = [];
-    for (const cfg of plugins.organizers ?? []) {
-      organizers.push((await loadCfg("organizer", cfg)) as OrganizerPlugin);
-    }
-    registry.organizers = organizers;
-    const observers: ObserverPlugin[] = [];
-    for (const cfg of plugins.observers ?? []) {
-      observers.push((await loadCfg("observer", cfg)) as ObserverPlugin);
-    }
-    registry.observers = observers;
+    registry.producers = await loadCategory<ProducerPlugin>("producer", plugins.producers);
+    registry.writers = await loadCategory<WriterPlugin>("writer", plugins.writers);
+    registry.filters = await loadCategory<FilterPlugin>("filter", plugins.filters);
+    registry.organizers = await loadCategory<OrganizerPlugin>("organizer", plugins.organizers);
+    registry.observers = await loadCategory<ObserverPlugin>("observer", plugins.observers);
 
     if (registry.producers.length === 0) {
       throw new Error("no producer plugin enabled (default: @naevic/agent-memoize/agent-producer)");
@@ -382,19 +368,6 @@ function withDefaultBuiltins(configured: PluginConfigGroup): PluginConfigGroup {
     observers: configured.observers ?? DEFAULT_PLUGINS.observers ?? [],
   };
 }
-
-/**
- * Runtime category order: ledgers init first so ctx.db is set before other
- * plugins run; the remaining categories keep the documented relative order.
- */
-const TYPES: PluginType[] = [
-  "ledger",
-  "producer",
-  "writer",
-  "filter",
-  "organizer",
-  "observer",
-];
 
 async function loadOne(
   id: string,

@@ -46,8 +46,19 @@ export async function walkTree(root: string): Promise<string[]> {
 }
 
 /** Glob-match a project-relative path against entry source patterns. */
+const SOURCE_MATCHERS = new WeakMap<string[], (rel: string) => boolean>();
+
+export function compileSources(sources: string[]): (rel: string) => boolean {
+  let matcher = SOURCE_MATCHERS.get(sources);
+  if (!matcher) {
+    matcher = picomatch(sources, { dot: true });
+    SOURCE_MATCHERS.set(sources, matcher);
+  }
+  return matcher;
+}
+
 export function matchesAny(sources: string[], rel: string): boolean {
-  return picomatch(sources, { dot: true })(rel);
+  return compileSources(sources)(rel);
 }
 
 // ---------- normalized content (Layer 1: cosmetic noise immunity) ----------
@@ -122,45 +133,23 @@ function stripComments(line: string, spec: CommentSpec, state: { inBlock: boolea
   return out;
 }
 
+function specs(extensions: string, spec: CommentSpec): Record<string, CommentSpec> {
+  return Object.fromEntries(extensions.split(" ").map((ext) => [ext, spec]));
+}
+
 const COMMENT_SPECS: Record<string, CommentSpec> = {
-  ".ts": { line: ["//"], block: ["/*", "*/"] },
-  ".tsx": { line: ["//"], block: ["/*", "*/"] },
-  ".mts": { line: ["//"], block: ["/*", "*/"] },
-  ".cts": { line: ["//"], block: ["/*", "*/"] },
-  ".js": { line: ["//"], block: ["/*", "*/"] },
-  ".jsx": { line: ["//"], block: ["/*", "*/"] },
-  ".mjs": { line: ["//"], block: ["/*", "*/"] },
-  ".cjs": { line: ["//"], block: ["/*", "*/"] },
-  ".java": { line: ["//"], block: ["/*", "*/"] },
-  ".c": { line: ["//"], block: ["/*", "*/"] },
-  ".h": { line: ["//"], block: ["/*", "*/"] },
-  ".cpp": { line: ["//"], block: ["/*", "*/"] },
-  ".hpp": { line: ["//"], block: ["/*", "*/"] },
-  ".cc": { line: ["//"], block: ["/*", "*/"] },
-  ".cs": { line: ["//"], block: ["/*", "*/"] },
-  ".go": { line: ["//"], block: ["/*", "*/"] },
-  ".rs": { line: ["//"], block: ["/*", "*/"] },
-  ".swift": { line: ["//"], block: ["/*", "*/"] },
-  ".kt": { line: ["//"], block: ["/*", "*/"] },
+  ...specs(
+    ".ts .tsx .mts .cts .js .jsx .mjs .cjs .java .c .h .cpp .hpp .cc .cs .go .rs .swift .kt",
+    { line: ["//"], block: ["/*", "*/"] },
+  ),
   ".php": { line: ["//", "#"], block: ["/*", "*/"] },
-  ".py": { line: ["#"] },
-  ".rb": { line: ["#"] },
-  ".sh": { line: ["#"] },
-  ".bash": { line: ["#"] },
-  ".zsh": { line: ["#"] },
-  ".yml": { line: ["#"] },
-  ".yaml": { line: ["#"] },
-  ".toml": { line: ["#"] },
-  ".ini": { line: [";", "#"] },
-  ".cfg": { line: [";", "#"] },
+  ...specs(".py .rb .sh .bash .zsh .yml .yaml .toml", { line: ["#"] }),
+  ...specs(".ini .cfg", { line: [";", "#"] }),
   ".sql": { line: ["--"], block: ["/*", "*/"] },
   ".lua": { line: ["--"] },
-  ".css": { block: ["/*", "*/"] },
   ".scss": { line: ["//"], block: ["/*", "*/"] },
-  ".less": { block: ["/*", "*/"] },
-  ".html": { block: ["<!--", "-->"] },
-  ".xml": { block: ["<!--", "-->"] },
-  ".md": { block: ["<!--", "-->"] },
+  ...specs(".css .less", { block: ["/*", "*/"] }),
+  ...specs(".html .xml .md", { block: ["<!--", "-->"] }),
 };
 
 // ---------- fingerprints ----------
@@ -172,30 +161,115 @@ export interface NormalizeOpts {
 /** Read-only helpers shared by status/update. */
 export type ChangeClass = "unchanged" | "cosmetic" | "changed" | "deleted";
 
+interface CachedFile {
+  mtimeMs: number;
+  size: number;
+}
+
+/** Per-operation source-file cache shared by status and baseline capture. */
+export class WorkspaceFileCache {
+  private readonly files = new Map<string, Promise<CachedFile | null>>();
+  private readonly contents = new Map<string, Promise<Buffer | null>>();
+  private readonly hashes = new Map<string, string>();
+  private readonly normalizedHashes = new Map<string, string>();
+
+  constructor(readonly root: string) {}
+
+  private load(rel: string): Promise<CachedFile | null> {
+    let pending = this.files.get(rel);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const st = await fs.stat(path.join(this.root, rel));
+          return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size } : null;
+        } catch {
+          return null;
+        }
+      })();
+      this.files.set(rel, pending);
+    }
+    return pending;
+  }
+
+  private read(rel: string): Promise<Buffer | null> {
+    let pending = this.contents.get(rel);
+    if (!pending) {
+      pending = fs.readFile(path.join(this.root, rel)).catch(() => null);
+      this.contents.set(rel, pending);
+    }
+    return pending;
+  }
+
+  async text(rel: string): Promise<string | null> {
+    const raw = await this.read(rel);
+    return raw?.toString("utf8") ?? null;
+  }
+
+  private async sha256(rel: string): Promise<string | null> {
+    const cached = this.hashes.get(rel);
+    if (cached) return cached;
+    const raw = await this.read(rel);
+    if (!raw) return null;
+    const hash = createHash("sha256").update(raw).digest("hex");
+    this.hashes.set(rel, hash);
+    return hash;
+  }
+
+  private async normalizedHash(rel: string, ignoreComments: boolean): Promise<string | null> {
+    const key = `${ignoreComments ? 1 : 0}\u0000${rel}`;
+    const cached = this.normalizedHashes.get(key);
+    if (cached) return cached;
+    const text = await this.text(rel);
+    if (text === null) return null;
+    const hash = createHash("sha256")
+      .update(normalizeContent(text, { ignoreComments, ext: path.extname(rel) }))
+      .digest("hex");
+    this.normalizedHashes.set(key, hash);
+    return hash;
+  }
+
+  async fingerprint(rel: string, norm: NormalizeOpts | null): Promise<FileFingerprint | null> {
+    const file = await this.load(rel);
+    if (!file) return null;
+    const sha256 = await this.sha256(rel);
+    if (!sha256) return null;
+    return {
+      sha256,
+      mtimeMs: file.mtimeMs,
+      size: file.size,
+      ...(norm ? { norm: await this.normalizedHash(rel, norm.ignoreComments) ?? undefined } : {}),
+    };
+  }
+
+  async classify(
+    rel: string,
+    fp: FileFingerprint | undefined,
+    ignoreComments: boolean,
+  ): Promise<ChangeClass> {
+    if (!fp) return "changed";
+    const file = await this.load(rel);
+    if (!file) return "deleted";
+    if (file.mtimeMs === fp.mtimeMs && file.size === fp.size) return "unchanged";
+    if ((await this.sha256(rel)) === fp.sha256) return "unchanged";
+    if (fp.norm && (await this.normalizedHash(rel, ignoreComments)) === fp.norm) {
+      return "cosmetic";
+    }
+    return "changed";
+  }
+
+  async matchesFingerprint(rel: string, fp: FileFingerprint): Promise<boolean> {
+    const file = await this.load(rel);
+    return file?.size === fp.size && (await this.sha256(rel)) === fp.sha256;
+  }
+}
+
 export async function fingerprint(
   root: string,
   rel: string,
   norm: NormalizeOpts | null,
+  cache = new WorkspaceFileCache(root),
 ): Promise<FileFingerprint | null> {
-  const fp = path.join(root, rel);
-  let st;
-  try {
-    st = await fs.stat(fp);
-  } catch {
-    return null;
-  }
-  const raw = await fs.readFile(fp);
-  const f: FileFingerprint = {
-    sha256: createHash("sha256").update(raw).digest("hex"),
-    mtimeMs: st.mtimeMs,
-    size: st.size,
-  };
-  if (norm) {
-    f.norm = createHash("sha256")
-      .update(normalizeContent(raw.toString("utf8"), { ignoreComments: norm.ignoreComments, ext: path.extname(rel) }))
-      .digest("hex");
-  }
-  return f;
+  return cache.fingerprint(rel, norm);
 }
 
 /**
@@ -208,25 +282,9 @@ export async function classifyChange(
   rel: string,
   fp: FileFingerprint | undefined,
   ignoreComments: boolean,
+  cache = new WorkspaceFileCache(root),
 ): Promise<ChangeClass> {
-  if (!fp) return "changed";
-  let st;
-  try {
-    st = await fs.stat(path.join(root, rel));
-  } catch {
-    return "deleted";
-  }
-  if (st.mtimeMs === fp.mtimeMs && st.size === fp.size) return "unchanged";
-  const raw = await fs.readFile(path.join(root, rel));
-  const sha = createHash("sha256").update(raw).digest("hex");
-  if (sha === fp.sha256) return "unchanged";
-  if (fp.norm) {
-    const norm = createHash("sha256")
-      .update(normalizeContent(raw.toString("utf8"), { ignoreComments, ext: path.extname(rel) }))
-      .digest("hex");
-    if (norm === fp.norm) return "cosmetic";
-  }
-  return "changed";
+  return cache.classify(rel, fp, ignoreComments);
 }
 
 // ---------- claim regions (Layer 2: claim-scoped staleness) ----------
@@ -296,6 +354,21 @@ function buildTokenMatcher(tokens: Iterable<string>): { wordRe: RegExp | null; p
   return { wordRe, paths };
 }
 
+export interface TokenMatcher {
+  size: number;
+  test(text: string): boolean;
+}
+
+/** Compile entry text once when testing it against multiple source files/lines. */
+export function compileTokenMatcher(text: string): TokenMatcher {
+  const tokens = extractTokens(text);
+  const { wordRe, paths } = buildTokenMatcher(tokens);
+  return {
+    size: tokens.size,
+    test: (candidate) => paths.some((p) => candidate.includes(p)) || Boolean(wordRe?.test(candidate)),
+  };
+}
+
 /**
  * True if any token from `text` is referenced by the file `rel`'s content.
  * Identifier tokens match on word boundaries (so "auth" ≠ "authority");
@@ -307,21 +380,16 @@ export async function entryReferencesFile(
   rel: string,
   text: string,
   ignoreComments = false,
+  cache = new WorkspaceFileCache(root),
+  matcher = compileTokenMatcher(text),
 ): Promise<boolean> {
-  const tokens = extractTokens(text);
-  if (tokens.size === 0) return false;
-  let content;
-  try {
-    content = await fs.readFile(path.join(root, rel), "utf8");
-  } catch {
-    return false;
-  }
+  if (matcher.size === 0) return false;
+  let content = await cache.text(rel);
+  if (content === null) return false;
   if (ignoreComments) {
     content = normalizeContent(content, { ignoreComments: true, ext: path.extname(rel) });
   }
-  const { wordRe, paths } = buildTokenMatcher(tokens);
-  if (paths.some((p) => content.includes(p))) return true;
-  return wordRe ? wordRe.test(content) : false;
+  return matcher.test(content);
 }
 
 /**
@@ -351,22 +419,9 @@ function stripInlineComment(line: string, spec: CommentSpec | undefined): string
 }
 
 /** Languages/formats where leading whitespace participates in program structure. */
-const INDENT_SENSITIVE_EXTS = new Set([
-  ".coffee",
-  ".fs",
-  ".fsx",
-  ".gd",
-  ".hs",
-  ".md",
-  ".nim",
-  ".pug",
-  ".py",
-  ".pyi",
-  ".sass",
-  ".styl",
-  ".yaml",
-  ".yml",
-]);
+const INDENT_SENSITIVE_EXTS = new Set(
+  ".coffee .fs .fsx .gd .hs .md .nim .pug .py .pyi .sass .styl .yaml .yml".split(" "),
+);
 
 /**
  * Collapse whitespace outside quoted literals while preserving literal contents.
@@ -459,75 +514,48 @@ function blockHash(lines: string[], ext?: string, ignoreComments = false): strin
     .digest("hex");
 }
 
-/**
- * Find the closing line index (0-based) of a brace-delimited block whose
- * opening `{` is on `startIdx` itself, honoring string/comment context so
- * braces inside literals or comments don't affect nesting. Returns -1 when
- * `startIdx` doesn't open a block (no unmatched `{` on that line) or the
- * block is unbalanced.
- */
-function findBlockEnd(lines: string[], startIdx: number, ext?: string): number {
+/** Find balanced brace blocks in one context-aware pass, keyed by opening line. */
+function findBlockEnds(lines: string[], ext?: string): Map<number, number> {
   const spec = ext ? COMMENT_SPECS[ext] : undefined;
   const blockPair = spec?.block;
   const lineMarkers = spec?.line ?? [];
-
-  // Context-aware scan of a single line: returns the net brace delta and
-  // whether the line opened a string/block comment that continues past its end.
-  const scanLine = (
-    line: string,
-    ctx: { inStr: string | null; inBlock: boolean },
-  ): { delta: number; lastOpenIdx: number } => {
-    let delta = 0;
-    let lastOpenIdx = -1;
+  const stack: number[] = [];
+  const ends = new Map<number, number>();
+  let inStr: string | null = null;
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     for (let j = 0; j < line.length; j++) {
       const ch = line[j];
-      const rest = line.slice(j);
-      if (ctx.inStr) {
-        if (ch === ctx.inStr && line[j - 1] !== "\\") ctx.inStr = null;
+      if (inBlock) {
+        if (blockPair && line.startsWith(blockPair[1], j)) {
+          inBlock = false;
+          j += blockPair[1].length - 1;
+        }
         continue;
       }
+      if (inStr) {
+        if (ch === inStr && line[j - 1] !== "\\") inStr = null;
+        continue;
+      }
+      if (blockPair && line.startsWith(blockPair[0], j)) {
+        inBlock = true;
+        j += blockPair[0].length - 1;
+        continue;
+      }
+      if (lineMarkers.some((marker) => line.startsWith(marker, j))) break;
       if (ch === '"' || ch === "'" || ch === "`") {
-        ctx.inStr = ch;
+        inStr = ch;
         continue;
       }
-      if (blockPair) {
-        if (rest.startsWith(blockPair[0])) {
-          const closeInRest = rest.slice(blockPair[0].length).indexOf(blockPair[1]);
-          if (closeInRest < 0) {
-            ctx.inBlock = true;
-            break;
-          }
-          j += blockPair[0].length + closeInRest + blockPair[1].length - 1;
-          continue;
-        }
-        if (ctx.inBlock && rest.includes(blockPair[1])) {
-          ctx.inBlock = false;
-        }
-      }
-      if (ctx.inBlock) continue;
-      if (lineMarkers.some((m) => rest.startsWith(m))) break;
-      if (ch === "{") {
-        delta++;
-        lastOpenIdx = j;
-      } else if (ch === "}") {
-        delta--;
+      if (ch === "{") stack.push(i);
+      else if (ch === "}") {
+        const start = stack.pop();
+        if (start !== undefined && start < i) ends.set(start, i);
       }
     }
-    return { delta, lastOpenIdx };
-  };
-
-  // The opening line must itself contain an unmatched `{`.
-  const ctx = { inStr: null as string | null, inBlock: false };
-  const first = scanLine(lines[startIdx], ctx);
-  if (first.delta <= 0) return -1; // no unmatched open brace on the start line
-
-  let depth = first.delta;
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const { delta } = scanLine(lines[i], ctx);
-    depth += delta;
-    if (depth <= 0) return i;
   }
-  return -1; // unbalanced
+  return ends;
 }
 
 /**
@@ -544,31 +572,22 @@ export async function claimLines(
   text: string,
   cap = 50,
   ignoreComments = false,
+  cache = new WorkspaceFileCache(root),
+  matcher = compileTokenMatcher(text),
 ): Promise<ClaimRegion[]> {
-  const tokens = extractTokens(text);
-  if (tokens.size === 0) return [];
-  let content;
-  try {
-    content = await fs.readFile(path.join(root, rel), "utf8");
-  } catch {
-    return [];
-  }
+  if (matcher.size === 0) return [];
+  const content = await cache.text(rel);
+  if (content === null) return [];
   const ext = path.extname(rel);
   const lines = content.split("\n");
   const normalizedLines = normalizeClaimLines(lines, ext, ignoreComments);
-  const { wordRe, paths } = buildTokenMatcher(tokens);
-  const lineMatches = (line: string): boolean => {
-    if (paths.some((p) => line.includes(p))) return true;
-    return wordRe ? wordRe.test(line) : false;
-  };
+  const blockEnds = findBlockEnds(lines, ext);
   const out: ClaimRegion[] = [];
-  const claimedLines = new Set<number>();
   for (let i = 0; i < lines.length && out.length < cap; i++) {
-    if (!lineMatches(ignoreComments ? normalizedLines[i] : lines[i])) continue;
-    const endIdx = findBlockEnd(lines, i, ext);
-    if (endIdx > i) {
+    if (!matcher.test(ignoreComments ? normalizedLines[i] : lines[i])) continue;
+    const endIdx = blockEnds.get(i);
+    if (endIdx !== undefined) {
       const blockLines = lines.slice(i, endIdx + 1);
-      for (let k = i; k <= endIdx; k++) claimedLines.add(k);
       out.push({
         line: i + 1,
         end: endIdx + 1,
@@ -576,6 +595,7 @@ export async function claimLines(
         hash: blockHash(blockLines, ext, ignoreComments),
         hashVersion: 3,
       });
+      i = endIdx;
     } else {
       out.push({ line: i + 1, hash: normalizedLineHash(normalizedLines[i]), hashVersion: 3 });
     }
@@ -625,23 +645,20 @@ export async function findBrokenClaims(
   rel: string,
   claims: ClaimRegion[],
   ignoreComments = false,
+  cache = new WorkspaceFileCache(root),
 ): Promise<ClaimRegion[]> {
   if (claims.length === 0) return [];
-  let content;
-  try {
-    content = await fs.readFile(path.join(root, rel), "utf8");
-  } catch {
-    return claims; // file gone → every claim is broken
-  }
+  const content = await cache.text(rel);
+  if (content === null) return claims; // file gone → every claim is broken
   const ext = path.extname(rel);
   const lines = content.split("\n");
   const present = currentLineHashes(lines, ext, ignoreComments);
   const blockCounts = new Map<string, number>();
-  for (let i = 0; i < lines.length; i++) {
-    const end = findBlockEnd(lines, i, ext);
-    if (end <= i) continue;
-    const hash = blockHash(lines.slice(i, end + 1), ext, ignoreComments);
-    blockCounts.set(hash, (blockCounts.get(hash) ?? 0) + 1);
+  if (claims.some((c) => c.kind === "block" && c.hashVersion === 3)) {
+    for (const [start, end] of findBlockEnds(lines, ext)) {
+      const hash = blockHash(lines.slice(start, end + 1), ext, ignoreComments);
+      blockCounts.set(hash, (blockCounts.get(hash) ?? 0) + 1);
+    }
   }
   const broken: ClaimRegion[] = [];
   for (const c of claims) {
@@ -681,19 +698,12 @@ export async function findRename(
   from: string,
   fp: FileFingerprint | undefined,
   tree: string[],
+  cache = new WorkspaceFileCache(root),
 ): Promise<string | null> {
   if (!fp) return null;
   for (const rel of tree) {
     if (rel === from) continue;
-    let st;
-    try {
-      st = await fs.stat(path.join(root, rel));
-    } catch {
-      continue;
-    }
-    if (st.size !== fp.size) continue;
-    const raw = await fs.readFile(path.join(root, rel));
-    if (createHash("sha256").update(raw).digest("hex") === fp.sha256) return rel;
+    if (await cache.matchesFingerprint(rel, fp)) return rel;
   }
   return null;
 }

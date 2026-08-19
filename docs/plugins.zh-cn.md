@@ -29,7 +29,7 @@
 
 Producer 插件是事实来源（sources of truth）。每个 producer 要么直接生成 truth——例如通过暴露一个基于 LSP 的 MCP 工具——要么告诉主 agent 如何生成。生成的 truth 会提供给主 agent，由主 agent 查看后决定下一步——通常是用 `memoize_update` 写入或刷新条目。
 
-**`@naevic/agent-memoize/agent-producer`**（内置，默认）——默认的事实来源。它在 `memoize_update` 的指引中要求主 agent 派生子 agent，目标是围绕条目主题探索项目，并把子 agent 的发现作为写入该条目的 truth。它还会检查 `sources`，在 glob 过宽、容易让条目过期时给出提示。
+**`@naevic/agent-memoize/agent-producer`**（内置，默认）——默认的事实来源。它在 `memoize_update` 的指引中要求主 agent 派生子 agent，目标是围绕条目主题探索项目，并把子 agent 的发现作为写入该条目的 truth。它还会检查 `sources`；当一个条目的 sources 合计匹配超过 20 个文件时给出提示，因为覆盖范围过大会让条目容易过期。
 
 ### Writer 插件
 

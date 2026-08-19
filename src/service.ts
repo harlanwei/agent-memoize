@@ -1,17 +1,11 @@
 import { promises as fs } from "node:fs";
-import { dirtyList, head as gitHead, isGitRepo, trackedFiles } from "./git.js";
+import { captureBaseline } from "./baseline.js";
 import { computeStatus, type StatusContext } from "./status.js";
-import {
-  claimLines,
-  fingerprint,
-  isValidName,
-  matchesAny,
-  storePath,
-  walkTree,
-} from "./workspace.js";
+import { createWorkspaceSnapshot, type WorkspaceSnapshot } from "./snapshot.js";
+import { isValidName, storePath } from "./workspace.js";
 import { getRegistry, type Registry } from "./plugins/registry.js";
 import type { LedgerPlugin, MemoryAccessEvent, ObserverPlugin, OrganizerOperation, RecallCandidate, UpdateArgs } from "./plugin.js";
-import type { ClaimRegion, Entry, EntryStatus, FileFingerprint, Manifest, StaleEntry, StatusResult } from "./types.js";
+import type { Entry, EntryStatus, StaleEntry, StatusResult } from "./types.js";
 
 export { entryFilePath } from "./plugins/builtin/file-ledger.js";
 export { storePath };
@@ -105,8 +99,14 @@ function mergeStatus(results: StatusResult[]): StatusResult {
 
 /** memoize_status: per-ledger staleness merged, then passed through the organizer chain. */
 export async function statusCtx(ctx: ServiceContext) {
+  const listings = await Promise.all(ctx.registry.ledgers.map((db) => db.listEntries()));
+  const snapshot = listings.some(({ entries }) => entries.length > 0)
+    ? await createWorkspaceSnapshot(ctx.root)
+    : undefined;
   const results = await Promise.all(
-    ctx.registry.ledgers.map((db) => computeStatus(statusContextFor(ctx, db))),
+    ctx.registry.ledgers.map((db, i) =>
+      computeStatus(statusContextFor(ctx, db), { listing: listings[i], snapshot }),
+    ),
   );
   return organizeResults(ctx, "status", mergeStatus(results));
 }
@@ -147,35 +147,8 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
     throw new Error("kind=decision entries take no sources");
   }
 
-  const repo = await isGitRepo(root);
-  // Capture state BEFORE writing, so the store files can never affect the baseline.
-  const gitNow = repo ? { head: await gitHead(root), dirty: await dirtyList(root) } : null;
-  const tree = repo
-    ? [...new Set([...(await trackedFiles(root)), ...gitNow!.dirty])]
-    : await walkTree(root);
   const sources = kind === "file" ? current.sources! : [];
-  const matched = tree.filter((p) => matchesAny(sources, p));
-
   const strict = registry.staleness === "strict";
-  const norm = strict ? null : { ignoreComments: registry.ignoreComments };
-  const files: Record<string, FileFingerprint> = {};
-  const claims: Record<string, ClaimRegion[]> = {};
-  for (const p of matched) {
-    const fp = await fingerprint(root, p, norm);
-    if (fp) {
-      files[p] = fp;
-      if (norm) {
-        claims[p] = await claimLines(
-          root,
-          p,
-          content + "\n" + (current.summary ?? ""),
-          50,
-          registry.ignoreComments,
-        );
-      }
-    }
-  }
-
   const entry: Entry = {
     name,
     kind,
@@ -185,6 +158,15 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
     summary: current.summary?.trim() || firstLine(content),
     content,
   };
+  // Capture state before writing, so store files can never affect the baseline.
+  const snapshot = await createWorkspaceSnapshot(root);
+  const { baseline, matched } = await captureBaseline(snapshot, {
+    sources,
+    content,
+    summary: entry.summary,
+    normalized: !strict,
+    ignoreComments: registry.ignoreComments,
+  });
 
   const warnings: string[] = [];
   for (const ds of registry.producers) {
@@ -200,12 +182,7 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
   await registry.primaryDb.withLock(async () => {
     await registry.primaryDb.writeEntry(entry);
     const m = await registry.primaryDb.loadManifest();
-    m.entries[name] = {
-      git: gitNow,
-      files,
-      hashMode: strict ? "raw" : "normalized",
-      claims: norm ? claims : undefined,
-    };
+    m.entries[name] = baseline;
     // Drop baselines whose entry files disappeared (manual deletion, failed wipe).
     const { entries } = await registry.primaryDb.listEntries();
     const onDisk = new Set(entries.map((e) => e.name));
@@ -238,6 +215,9 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
   let sawEntries = false;
   let firstState: StatusResult["state"] = "fresh";
   const availableNames: string[] = [];
+  const availableNameSet = new Set<string>();
+  let snapshot: Promise<WorkspaceSnapshot> | undefined;
+  const workspace = () => snapshot ??= createWorkspaceSnapshot(ctx.root);
   let result: unknown;
   let access: { topic?: string; entries: { name: string; status: EntryStatus | "missing" }[] } = {
     entries: [],
@@ -248,10 +228,13 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
   // contradiction. If the group's candidates survive the filter chain, they
   // are the truth; otherwise recall continues with the next group.
   outer: for (const group of registry.ledgerGroups) {
-    const [statuses, lists] = await Promise.all([
-      Promise.all(group.map((db) => computeStatus(statusContextFor(ctx, db)))),
-      Promise.all(group.map((db) => db.listEntries())),
-    ]);
+    const lists = await Promise.all(group.map((db) => db.listEntries()));
+    const shared = lists.some(({ entries }) => entries.length > 0) ? await workspace() : undefined;
+    const statuses = await Promise.all(
+      group.map((db, i) =>
+        computeStatus(statusContextFor(ctx, db), { listing: lists[i], snapshot: shared }),
+      ),
+    );
     const status = mergeStatus(statuses);
     const entries: Entry[] = [];
     const seen = new Set<string>();
@@ -287,7 +270,10 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
       candidates = (await f.filter({ topic }, candidates)) ?? candidates;
     }
     for (const c of candidates) {
-      if (!availableNames.includes(c.entry.name)) availableNames.push(c.entry.name);
+      if (!availableNameSet.has(c.entry.name)) {
+        availableNameSet.add(c.entry.name);
+        availableNames.push(c.entry.name);
+      }
     }
 
     if (!topic) {

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Registry } from "../src/plugins/registry.js";
 import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx } from "../src/service.js";
 import type { ServiceContext } from "../src/service.js";
@@ -11,9 +11,8 @@ import { createPlugin as createStalenessFilter } from "../src/plugins/builtin/st
 import { createPlugin as createAgentDs } from "../src/plugins/builtin/agent-producer.js";
 import { createPlugin as createDreaming } from "../src/plugins/builtin/dream-organizer.js";
 import {
-  logs as dashboardLogs,
-  plugin as dashboard,
-  url as dashboardUrl,
+  createPlugin as createDashboard,
+  type DashboardPlugin,
 } from "../packages/agent-memoize-plugin-log-observer/src/index.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -374,11 +373,57 @@ describe("observer plugin type", () => {
   });
 });
 
+describe("shared operation state", () => {
+  it("lists each ledger only once per status or recall", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.txt", "hello\n");
+    const base = createFilesDb();
+    let listCalls = 0;
+    const ledger = {
+      ...base,
+      id: "counting-ledger",
+      async listEntries() {
+        listCalls++;
+        return base.listEntries();
+      },
+    };
+    const plugins = {
+      ...defaultPlugins,
+      ledgers: [{ id: ledger.id }],
+    };
+    const registry = await makeRegistry(dir, { ledgers: [ledger] }, { plugins });
+    const ctx = ctxFor(registry, dir);
+    await updateEntryCtx(ctx, {
+      name: "a",
+      kind: "file",
+      sources: ["a.txt"],
+      content: "hello",
+      author: "test",
+    });
+
+    listCalls = 0;
+    await statusCtx(ctx);
+    expect(listCalls).toBe(1);
+
+    listCalls = 0;
+    await recallCtx(ctx, "a");
+    expect(listCalls).toBe(1);
+    await registry.shutdown();
+  });
+});
+
 describe("dashboard plugin", () => {
+  let dashboard: DashboardPlugin;
+  let dashboards: DashboardPlugin[];
+
+  beforeEach(() => {
+    dashboards = [];
+    dashboard = createDashboard();
+    dashboards.push(dashboard);
+  });
+
   afterEach(async () => {
-    if (dashboardUrl()) {
-      await dashboard.shutdown?.();
-    }
+    await Promise.all(dashboards.map((instance) => instance.shutdown?.()));
   });
 
   it("logs memory creation and access, and serves them over HTTP", async () => {
@@ -391,7 +436,7 @@ describe("dashboard plugin", () => {
       },
     });
     const ctx = ctxFor(r, dir);
-    const base = dashboardUrl();
+    const base = dashboard.url();
     expect(base).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
 
     const page = await (await fetch(base + "/")).text();
@@ -414,7 +459,7 @@ describe("dashboard plugin", () => {
       entry: { name: "m" },
     });
     expect(api.logs[1].data).toMatchObject({ accessor: "unknown", topic: "m", entries: [{ name: "m", status: "fresh" }] });
-    expect(dashboardLogs()).toHaveLength(2);
+    expect(dashboard.logs()).toHaveLength(2);
 
     await sleep(100);
     const file = path.join(dir, ".agent-memoize", "logs", "dashboard.jsonl");
@@ -423,7 +468,7 @@ describe("dashboard plugin", () => {
     expect(JSON.parse(lines[0]).event).toBe("memory.created");
 
     await r.shutdown();
-    expect(dashboardUrl()).toBe("");
+    expect(dashboard.url()).toBe("");
   });
 
   it("loads history from the JSONL file on startup, continuing ids", async () => {
@@ -446,7 +491,7 @@ describe("dashboard plugin", () => {
         observers: [{ id: "dashboard", options: { port: 0 } }],
       },
     });
-    const base = dashboardUrl();
+    const base = dashboard.url();
 
     const api = (await (await fetch(base + "/api/logs")).json()) as any;
     expect(api.logs.map((l: any) => l.event)).toEqual(["memory.created", "memory.accessed"]);
@@ -476,7 +521,7 @@ describe("dashboard plugin", () => {
         observers: [{ id: "dashboard", options: { port: 0 } }],
       },
     });
-    const base = dashboardUrl();
+    const base = dashboard.url();
     expect(await apiEmpty(base)).toBe(true);
 
     const logPath = path.join(dir, ".agent-memoize", "logs", "dashboard.jsonl");
@@ -506,11 +551,14 @@ describe("dashboard plugin", () => {
       observers: [{ id: "dashboard", options: { port } }],
     });
     const rA = await makeRegistry(dir, { observers: [dashboard] }, { plugins: mkConfig(0) });
-    const baseA = dashboardUrl();
+    const baseA = dashboard.url();
     const portA = Number(new URL(baseA).port);
 
-    const rB = await makeRegistry(dir, { observers: [dashboard] }, { plugins: mkConfig(portA) });
-    expect(dashboardUrl()).toBe(baseA); // no second HTTP instance
+    const sibling = createDashboard();
+    dashboards.push(sibling);
+    const rB = await makeRegistry(dir, { observers: [sibling] }, { plugins: mkConfig(portA) });
+    expect(dashboard.url()).toBe(baseA);
+    expect(sibling.url()).toBe(""); // log-only: no second HTTP instance
 
     await updateEntryCtx(
       { root: dir, registry: rB, accessor: "codex" },
@@ -527,6 +575,38 @@ describe("dashboard plugin", () => {
     const file = path.join(dir, ".agent-memoize", "logs", "dashboard.jsonl");
     const lines = (await fs.readFile(file, "utf8")).trim().split("\n");
     expect(JSON.parse(lines[0]).data.accessor).toBe("codex");
+
+    await rA.shutdown();
+    await rB.shutdown();
+  });
+
+  it("keeps dashboards for different roots isolated in one process", async () => {
+    const dirA = await tmpDir();
+    const dirB = await tmpDir();
+    await write(dirA, "a.txt", "a\n");
+    await write(dirB, "b.txt", "b\n");
+    const dashboardB = createDashboard();
+    dashboards.push(dashboardB);
+    const config = (id: string) => ({
+      ...defaultPlugins,
+      observers: [{ id, options: { port: 0, logFile: false } }],
+    });
+    const rA = await makeRegistry(dirA, { observers: [dashboard] }, { plugins: config("dashboard") });
+    const rB = await makeRegistry(dirB, { observers: [dashboardB] }, { plugins: config("dashboard") });
+
+    expect(dashboard.url()).not.toBe(dashboardB.url());
+    expect((await (await fetch(dashboard.url() + "/api/logs")).json() as any).project).toBe(dirA);
+    expect((await (await fetch(dashboardB.url() + "/api/logs")).json() as any).project).toBe(dirB);
+
+    await updateEntryCtx(ctxFor(rA, dirA), {
+      name: "a",
+      kind: "file",
+      sources: ["a.txt"],
+      content: "a",
+      author: "a",
+    });
+    expect(dashboard.logs()).toHaveLength(1);
+    expect(dashboardB.logs()).toHaveLength(0);
 
     await rA.shutdown();
     await rB.shutdown();

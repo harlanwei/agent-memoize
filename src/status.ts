@@ -1,26 +1,17 @@
+import { captureBaseline } from "./baseline.js";
 import {
-  diffNameOnly,
-  dirtyList,
-  head as gitHead,
-  isGitRepo,
-  isValidCommit,
-  trackedFiles,
-  type CommitDiff,
-} from "./git.js";
-import {
-  claimLines,
   classifyChange,
+  compileSources,
+  compileTokenMatcher,
   entryReferencesFile,
-  extractTokens,
   findBrokenClaims,
   fingerprint,
   findRename,
-  matchesAny,
-  walkTree,
 } from "./workspace.js";
 import { getRegistry } from "./plugins/registry.js";
 import type { LedgerPlugin } from "./plugin.js";
-import type { ClaimRegion, Entry, EntryBaseline, FileFingerprint, StaleEntry, StalenessPolicy, StatusResult } from "./types.js";
+import { commitDiff, createWorkspaceSnapshot, type WorkspaceSnapshot } from "./snapshot.js";
+import type { EntryBaseline, StaleEntry, StalenessPolicy, StatusResult } from "./types.js";
 
 /** Output arrays are capped so a huge diff can't flood the agent's context. */
 const CAP = 50;
@@ -35,6 +26,13 @@ export interface StatusContext {
 interface ReBaselinePlan {
   name: string;
   sources: string[];
+}
+
+type EntryListing = Awaited<ReturnType<LedgerPlugin["listEntries"]>>;
+
+export interface ComputeStatusOptions {
+  listing?: EntryListing;
+  snapshot?: WorkspaceSnapshot;
 }
 
 function emptyResult(mode: "git" | "hash" | null, invalid: string[] = []): StatusResult {
@@ -76,6 +74,7 @@ async function contentCompare(
   added: Set<string>,
   deleted: Set<string>,
   cosmetic: Set<string>,
+  snapshot: WorkspaceSnapshot,
 ): Promise<void> {
   const baseFiles = base?.files ?? {};
   for (const p of matched) {
@@ -83,7 +82,7 @@ async function contentCompare(
       added.add(p);
       continue;
     }
-    const c = await classifyChange(ctx.root, p, baseFiles[p], ctx.ignoreComments);
+    const c = await classifyChange(ctx.root, p, baseFiles[p], ctx.ignoreComments, snapshot.files);
     if (c === "changed") changed.add(p);
     else if (c === "deleted") deleted.add(p);
     else if (c === "cosmetic") cosmetic.add(p);
@@ -94,30 +93,17 @@ async function contentCompare(
   }
 }
 
-export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
+export async function computeStatus(
+  ctx: StatusContext,
+  options: ComputeStatusOptions = {},
+): Promise<StatusResult> {
   const { root, db } = ctx;
-  const { entries, invalid } = await db.listEntries();
+  const { entries, invalid } = options.listing ?? await db.listEntries();
   if (entries.length === 0) return emptyResult(null, invalid);
 
-  const repo = await isGitRepo(root);
-  const mode = repo ? ("git" as const) : ("hash" as const);
-  const gitNow = repo ? { head: await gitHead(root), dirty: await dirtyList(root) } : null;
-  const tree = repo
-    ? [...new Set([...(await trackedFiles(root)), ...gitNow!.dirty])]
-    : await walkTree(root);
+  const snapshot = options.snapshot ?? await createWorkspaceSnapshot(root);
+  const { mode, git: gitNow, tree } = snapshot;
   const manifest = await db.loadManifest();
-
-  // name-status diffs are identical for entries sharing a baseline head — cache them.
-  const diffCache = new Map<string, CommitDiff | null>();
-  const cachedDiff = async (oldHead: string, newHead: string): Promise<CommitDiff | null> => {
-    if (!diffCache.has(oldHead)) {
-      diffCache.set(
-        oldHead,
-        (await isValidCommit(root, oldHead)) ? await diffNameOnly(root, oldHead, newHead) : null,
-      );
-    }
-    return diffCache.get(oldHead)!;
-  };
 
   const changed = new Set<string>();
   const added = new Set<string>();
@@ -130,7 +116,10 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
   for (const e of entries) {
     if (e.kind === "decision") continue; // only the user can contradict a decision
     const base = manifest.entries[e.name] ?? null;
-    const matched = tree.filter((p) => matchesAny(e.sources, p));
+    const sourceMatcher = compileSources(e.sources);
+    const matched = tree.filter(sourceMatcher);
+    const entryText = `${e.content}\n${e.summary}`;
+    const tokenMatcher = normalized(ctx) ? compileTokenMatcher(entryText) : undefined;
     const ec = new Set<string>();
     const ea = new Set<string>();
     const ed = new Set<string>();
@@ -139,13 +128,13 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       if (base.git.head !== gitNow.head) {
         // Commits happened since the baseline: precise diff, or hash fallback
         // if the baseline commit was lost to a history rewrite.
-        const d = await cachedDiff(base.git.head, gitNow.head);
+        const d = await commitDiff(snapshot, base.git.head);
         if (d) {
           d.changed.forEach((p) => ec.add(p));
           d.added.forEach((p) => ea.add(p));
           d.deleted.forEach((p) => ed.add(p));
         } else {
-          await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic);
+          await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic, snapshot);
         }
       }
       // Files that became dirty or clean since the baseline.
@@ -154,22 +143,22 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       // git state can't tell them apart, so verify content by hash.
       const dirtyNow = new Set(gitNow.dirty);
       for (const p of base.git.dirty) {
-        if (dirtyNow.has(p) && matchesAny(e.sources, p)) {
-          const c = await classifyChange(root, p, base.files[p], ctx.ignoreComments);
+        if (dirtyNow.has(p) && sourceMatcher(p)) {
+          const c = await classifyChange(root, p, base.files[p], ctx.ignoreComments, snapshot.files);
           if (c === "changed") ec.add(p);
           else if (c === "deleted") ed.add(p);
         }
       }
     } else {
-      await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic);
+      await contentCompare(ctx, matched, base, ec, ea, ed, cosmetic, snapshot);
     }
 
     // Dirty-set changes don't encode whether a path was added or deleted.
     // Resolve relevant paths against the entry baseline so worktree renames
     // follow the same delete+add recovery path as committed renames.
     for (const p of [...ec]) {
-      if (!matchesAny(e.sources, p)) continue;
-      const current = await fingerprint(root, p, null);
+      if (!sourceMatcher(p)) continue;
+      const current = await fingerprint(root, p, null, snapshot.files);
       if (!current) {
         ec.delete(p);
         ed.add(p);
@@ -186,7 +175,7 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
     let needsRebaseline = false;
     const renames: { from: string; to: string }[] = [];
 
-    for (const p of hitsOf(ec, ea, ed, e.sources)) {
+    for (const p of hitsOf(ec, ea, ed, sourceMatcher)) {
       if (ea.has(p)) {
         added.add(p);
         // A new file inside the sources glob. Under "strict" this always stales.
@@ -195,11 +184,17 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         // existing claim. If the entry has no token coverage at all we can't prove
         // the file is unrelated, so surface it to preserve the safety property.
         if (normalized(ctx)) {
-          const text = e.content + "\n" + e.summary;
-          const referenced = await entryReferencesFile(root, p, text, ctx.ignoreComments);
+          const referenced = await entryReferencesFile(
+            root,
+            p,
+            entryText,
+            ctx.ignoreComments,
+            snapshot.files,
+            tokenMatcher,
+          );
           if (referenced) {
             entryStaleSources.push(p);
-          } else if (extractTokens(text).size === 0) {
+          } else if (tokenMatcher?.size === 0) {
             // No token coverage to prove the file is unrelated — surface it.
             entryStaleSources.push(p);
           } else {
@@ -215,7 +210,7 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
         deleted.add(p);
         if (e.sources.includes(p)) {
           // Explicit-path source vanished: look for a rename (same content elsewhere).
-          const to = await findRename(root, p, base?.files[p], tree);
+          const to = await findRename(root, p, base?.files[p], tree, snapshot.files);
           if (to) {
             renames.push({ from: p, to });
             added.add(to);
@@ -229,7 +224,13 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       }
       // Changed file: cosmetic → fresh; claim lines intact → re-baseline;
       // claim line broken (or no claims) → stale.
-      const classification = await classifyChange(root, p, base?.files[p], ctx.ignoreComments);
+      const classification = await classifyChange(
+        root,
+        p,
+        base?.files[p],
+        ctx.ignoreComments,
+        snapshot.files,
+      );
       if (classification === "unchanged") {
         needsRebaseline = true;
         continue;
@@ -242,7 +243,7 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
       changed.add(p);
       const claims = base?.claims?.[p];
       if (claims && claims.length > 0) {
-        const broken = await findBrokenClaims(root, p, claims, ctx.ignoreComments);
+        const broken = await findBrokenClaims(root, p, claims, ctx.ignoreComments, snapshot.files);
         if (broken.length === 0) {
           needsRebaseline = true;
           continue;
@@ -303,16 +304,30 @@ export async function computeStatus(ctx: StatusContext): Promise<StatusResult> {
   const verified: string[] = [];
   if (reBaseline.size > 0) {
     try {
+      const byName = new Map(entries.map((e) => [e.name, e]));
+      const prepared = await Promise.all(
+        [...reBaseline.values()].map(async (plan) => {
+          const entry = byName.get(plan.name);
+          if (!entry) return null;
+          const { baseline } = await captureBaseline(snapshot, {
+            sources: plan.sources,
+            content: entry.content,
+            summary: entry.summary,
+            normalized: normalized(ctx),
+            ignoreComments: ctx.ignoreComments,
+          });
+          return { plan, entry, baseline };
+        }),
+      );
       await db.withLock(async () => {
         const m = await db.loadManifest();
-        const byName = new Map(entries.map((e) => [e.name, e]));
-        for (const plan of reBaseline.values()) {
-          const e = byName.get(plan.name);
-          if (!e) continue;
-          if (plan.sources.join("\u0000") !== e.sources.join("\u0000")) {
-            await db.writeEntry({ ...e, sources: plan.sources });
+        for (const item of prepared) {
+          if (!item) continue;
+          const { plan, entry, baseline } = item;
+          if (plan.sources.join("\u0000") !== entry.sources.join("\u0000")) {
+            await db.writeEntry({ ...entry, sources: plan.sources });
           }
-          m.entries[plan.name] = await rebuildBaseline(ctx, e, plan.sources, tree, gitNow);
+          m.entries[plan.name] = baseline;
         }
         await db.saveManifest(m);
       });
@@ -351,44 +366,9 @@ function hitsOf(
   ec: Set<string>,
   ea: Set<string>,
   ed: Set<string>,
-  sources: string[],
+  matches: (path: string) => boolean,
 ): string[] {
-  return [...ec, ...ea, ...ed].filter((p) => matchesAny(sources, p));
-}
-
-/** Fresh baseline for a verified entry, mirroring update-time capture. */
-async function rebuildBaseline(
-  ctx: StatusContext,
-  e: Entry,
-  sources: string[],
-  tree: string[],
-  gitNow: { head: string | null; dirty: string[] } | null,
-): Promise<EntryBaseline> {
-  const norm = normalized(ctx) ? { ignoreComments: ctx.ignoreComments } : null;
-  const matched = tree.filter((p) => matchesAny(sources, p));
-  const files: Record<string, FileFingerprint> = {};
-  const claims: Record<string, ClaimRegion[]> = {};
-  for (const p of matched) {
-    const fp = await fingerprint(ctx.root, p, norm);
-    if (fp) {
-      files[p] = fp;
-      if (norm) {
-        claims[p] = await claimLines(
-          ctx.root,
-          p,
-          e.content + "\n" + e.summary,
-          50,
-          ctx.ignoreComments,
-        );
-      }
-    }
-  }
-  return {
-    git: gitNow,
-    files,
-    hashMode: norm ? "normalized" : "raw",
-    claims: norm ? claims : undefined,
-  };
+  return [...new Set([...ec, ...ea, ...ed])].filter(matches);
 }
 
 /** Status entry point used by tools/tests: default registry for the root. */

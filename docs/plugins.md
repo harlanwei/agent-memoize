@@ -29,7 +29,7 @@ Sometimes when instructed, the agent would organize memories using *organizers*,
 
 Producer plugins are sources of truth. Each producer either generates the truth directly — for example by exposing an LSP-backed MCP tool — or tells the main agent how to generate it. The generated truth is provided to the main agent, which looks at it and decides what to do next — usually writing or refreshing the entry with `memoize_update`.
 
-**`@naevic/agent-memoize/agent-producer`** (built-in, default) — the default source of truth. Its `memoize_update` guidance tells the main agent to spawn a subagent with the goal to explore the project around the entry's topic, then use that subagent's findings as the truth written to the entry. It also lints `sources` and warns when a glob is wide enough to make the entry stale easily.
+**`@naevic/agent-memoize/agent-producer`** (built-in, default) — the default source of truth. Its `memoize_update` guidance tells the main agent to spawn a subagent with the goal to explore the project around the entry's topic, then use that subagent's findings as the truth written to the entry. It also lints `sources` and warns when an entry's sources collectively match more than 20 files, since broad coverage makes the entry stale easily.
 
 ### Writer plugins
 

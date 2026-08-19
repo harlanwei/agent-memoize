@@ -14,103 +14,8 @@ export interface LogRecord {
   data: unknown;
 }
 
-let server: Server | null = null;
-let port = DEFAULT_PORT;
-let maxLogs = DEFAULT_MAX_LOGS;
-let logFile: string | null = null;
-let project = "";
-let baseUrl = "";
-let seq = 0;
-const buffer: LogRecord[] = [];
-const seenIds = new Set<string>();
-/** Bytes of logFile already incorporated into the buffer. */
-let fileSize = 0;
-/** In-flight JSONL appends, flushed on shutdown (log-only instances persist only this way). */
-let pendingWrites: Promise<void>[] = [];
-
 function numOption(v: unknown, def: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : def;
-}
-
-// ---------- shared JSONL log (single source of truth across processes) ----------
-
-function merge(rec: LogRecord): void {
-  const key = String(rec.id);
-  if (seenIds.has(key)) return;
-  seenIds.add(key);
-  buffer.push(rec);
-  if (buffer.length > maxLogs) {
-    const dropped = buffer.splice(0, buffer.length - maxLogs);
-    for (const d of dropped) seenIds.delete(String(d.id));
-  }
-}
-
-function record(event: LogRecord["event"], data: unknown): LogRecord {
-  const rec: LogRecord = {
-    id: `${process.pid}.${++seq}`,
-    ts: new Date().toISOString(),
-    event,
-    data,
-  };
-  merge(rec);
-  if (logFile) {
-    const w = fs
-      .appendFile(logFile, JSON.stringify(rec) + "\n", "utf8")
-      .catch(() => {})
-      .finally(() => {
-        const i = pendingWrites.indexOf(w);
-        if (i >= 0) pendingWrites.splice(i, 1);
-      });
-    pendingWrites.push(w);
-  }
-  return rec;
-}
-
-/**
- * Tail the JSONL file and merge records written by other processes
- * (sibling agent sessions). Called on every /api/logs request.
- */
-async function syncFromFile(): Promise<void> {
-  if (!logFile || !server) return;
-  let st: Awaited<ReturnType<typeof fs.stat>>;
-  try {
-    st = await fs.stat(logFile);
-  } catch {
-    return;
-  }
-  if (st.size === fileSize) return;
-  if (st.size < fileSize) fileSize = 0; // file was rewritten — re-read
-  const len = st.size - fileSize;
-  const chunk = Buffer.alloc(len);
-  let fh: fs.FileHandle | undefined;
-  try {
-    fh = await fs.open(logFile, "r");
-    const { bytesRead } = await fh.read(chunk, 0, len, fileSize);
-    const part = chunk.subarray(0, bytesRead);
-    // Only consume complete lines; a partial tail (crash mid-write) is re-read next poll.
-    const lastNl = part.lastIndexOf(0x0a);
-    if (lastNl < 0) return;
-    fileSize += lastNl + 1;
-    for (const line of part.toString("utf8", 0, lastNl).split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line) as LogRecord;
-        if (
-          rec &&
-          (typeof rec.id === "string" || typeof rec.id === "number") &&
-          typeof rec.event === "string"
-        ) {
-          merge(rec);
-        }
-      } catch {
-        // corrupt line — skip
-      }
-    }
-  } catch {
-    // read race (file replaced) — next poll retries
-  } finally {
-    await fh?.close();
-  }
 }
 
 // ---------- HTTP dashboard ----------
@@ -166,23 +71,6 @@ setInterval(refresh, 2000);
 </html>
 `;
 
-async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  if (url.pathname === "/api/logs") {
-    await syncFromFile();
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ project, logs: buffer }));
-    return;
-  }
-  if (url.pathname === "/") {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(PAGE);
-    return;
-  }
-  res.writeHead(404, { "content-type": "text/plain" });
-  res.end("not found");
-}
-
 function listen(srv: Server, p: number): Promise<void> {
   return new Promise((resolve, reject) => {
     srv.once("error", reject);
@@ -205,86 +93,176 @@ async function isSiblingDashboard(p: number, root: string): Promise<boolean> {
   }
 }
 
-// ---------- test surface ----------
-
-/** Recent in-memory log records (newest last). */
-export function logs(): LogRecord[] {
-  return [...buffer];
+export interface DashboardPlugin extends ObserverPlugin {
+  logs(): LogRecord[];
+  url(): string;
 }
 
-/** Base URL of the dashboard served by this process ("" in log-only mode). */
-export function url(): string {
-  return baseUrl;
-}
+/** Fresh state per registry/root; sibling processes coordinate only through JSONL + HTTP. */
+export function createPlugin(): DashboardPlugin {
+  let server: Server | null = null;
+  let port = DEFAULT_PORT;
+  let maxLogs = DEFAULT_MAX_LOGS;
+  let logFile: string | null = null;
+  let project = "";
+  let baseUrl = "";
+  let seq = 0;
+  let fileSize = 0;
+  const buffer: LogRecord[] = [];
+  const seenIds = new Set<string>();
+  const pendingWrites = new Set<Promise<void>>();
 
-export const plugin: ObserverPlugin = {
-  id: "dashboard",
-  version: "1.0.0",
-  type: "observer",
+  const merge = (rec: LogRecord): void => {
+    const key = String(rec.id);
+    if (seenIds.has(key)) return;
+    seenIds.add(key);
+    buffer.push(rec);
+    if (buffer.length > maxLogs) {
+      for (const dropped of buffer.splice(0, buffer.length - maxLogs)) {
+        seenIds.delete(String(dropped.id));
+      }
+    }
+  };
 
-  async init(ctx: PluginContext) {
-    port = numOption(ctx.options.port, DEFAULT_PORT);
-    maxLogs = numOption(ctx.options.maxLogs, DEFAULT_MAX_LOGS);
-    project = ctx.root;
-    const file = ctx.options.logFile;
-    if (file !== false) {
-      const p =
-        typeof file === "string"
+  const record = (event: LogRecord["event"], data: unknown): void => {
+    const rec: LogRecord = {
+      id: `${process.pid}.${++seq}`,
+      ts: new Date().toISOString(),
+      event,
+      data,
+    };
+    merge(rec);
+    if (!logFile) return;
+    const write = fs.appendFile(logFile, JSON.stringify(rec) + "\n", "utf8").catch(() => {});
+    pendingWrites.add(write);
+    void write.then(() => pendingWrites.delete(write));
+  };
+
+  const syncFromFile = async (): Promise<void> => {
+    if (!logFile || !server) return;
+    let st: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      st = await fs.stat(logFile);
+    } catch {
+      return;
+    }
+    if (st.size === fileSize) return;
+    if (st.size < fileSize) fileSize = 0;
+    const len = st.size - fileSize;
+    const chunk = Buffer.alloc(len);
+    let handle: fs.FileHandle | undefined;
+    try {
+      handle = await fs.open(logFile, "r");
+      const { bytesRead } = await handle.read(chunk, 0, len, fileSize);
+      const part = chunk.subarray(0, bytesRead);
+      const lastNl = part.lastIndexOf(0x0a);
+      if (lastNl < 0) return;
+      fileSize += lastNl + 1;
+      for (const line of part.toString("utf8", 0, lastNl).split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const rec = JSON.parse(line) as LogRecord;
+          if (
+            rec &&
+            (typeof rec.id === "string" || typeof rec.id === "number") &&
+            typeof rec.event === "string"
+          ) merge(rec);
+        } catch {
+          // corrupt line — skip
+        }
+      }
+    } catch {
+      // read race (file replaced) — next poll retries
+    } finally {
+      await handle?.close();
+    }
+  };
+
+  const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/api/logs") {
+      await syncFromFile();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ project, logs: buffer }));
+    } else if (url.pathname === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(PAGE);
+    } else {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+    }
+  };
+
+  return {
+    id: "dashboard",
+    version: "1.0.0",
+    type: "observer",
+    logs: () => [...buffer],
+    url: () => baseUrl,
+
+    async init(ctx: PluginContext) {
+      port = numOption(ctx.options.port, DEFAULT_PORT);
+      maxLogs = numOption(ctx.options.maxLogs, DEFAULT_MAX_LOGS);
+      project = ctx.root;
+      const file = ctx.options.logFile;
+      logFile = file === false
+        ? null
+        : typeof file === "string"
           ? path.resolve(ctx.root, file)
           : path.join(ctx.root, ".agent-memoize", "logs", "dashboard.jsonl");
-      await fs.mkdir(path.dirname(p), { recursive: true });
-      logFile = p;
-    }
-    // State belongs to the HTTP-owning instance of this process. When another
-    // dashboard already runs here (sibling test instance), leave its state alone.
-    if (!server) {
-      buffer.length = 0;
-      seq = 0;
-      seenIds.clear();
-      fileSize = 0;
-      baseUrl = "";
-    }
-    const srv = createServer(handle);
-    try {
-      await listen(srv, port);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
-      if (await isSiblingDashboard(port, project)) {
-        // Another agent's session already serves this project's dashboard:
-        // don't start a second HTTP instance, but keep logging to the
-        // shared JSONL file — the running instance tails it.
-        ctx.log(
-          "info",
-          `dashboard already running for this project at http://127.0.0.1:${port} — logging only`,
-        );
-        return;
+      if (logFile) await fs.mkdir(path.dirname(logFile), { recursive: true });
+
+      const candidate = createServer(handle);
+      try {
+        await listen(candidate, port);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+        if (await isSiblingDashboard(port, project)) {
+          ctx.log(
+            "info",
+            `dashboard already running for this project at http://127.0.0.1:${port} — logging only`,
+          );
+          return;
+        }
+        port = 0;
+        await listen(candidate, 0);
+        ctx.log("warn", "configured dashboard port is held by another service; using a random port");
       }
-      // The port is held by an unrelated service: serve on a random port instead.
-      port = 0;
-      await listen(srv, 0);
-      ctx.log("warn", "configured dashboard port is held by another service; using a random port");
-    }
-    server = srv;
-    const addr = server.address();
-    if (addr && typeof addr === "object") port = addr.port;
-    baseUrl = `http://127.0.0.1:${port}`;
-    if (logFile) await syncFromFile(); // replay history persisted by previous sessions
-    ctx.log("info", `dashboard listening at ${baseUrl}`);
-  },
+      server = candidate;
+      const address = server.address();
+      if (address && typeof address === "object") port = address.port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      if (logFile) await syncFromFile();
+      ctx.log("info", `dashboard listening at ${baseUrl}`);
+    },
 
-  async shutdown() {
-    if (pendingWrites.length > 0) await Promise.allSettled(pendingWrites);
-    if (!server) return;
-    await new Promise<void>((resolve) => server!.close(() => resolve()));
-    server = null;
-    baseUrl = "";
-  },
+    async shutdown() {
+      if (pendingWrites.size > 0) await Promise.allSettled([...pendingWrites]);
+      if (!server) return;
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = null;
+      baseUrl = "";
+    },
 
-  async onMemoryCreated(entry, operation, accessor) {
-    record("memory.created", { operation, accessor, entry });
-  },
+    onMemoryCreated(entry, operation, accessor) {
+      record("memory.created", { operation, accessor, entry });
+    },
 
-  async onMemoryAccessed(access) {
-    record("memory.accessed", access);
-  },
-};
+    onMemoryAccessed(access) {
+      record("memory.accessed", access);
+    },
+  };
+}
+
+/**
+ * Backward-compatible singleton surface that is also callable by the registry
+ * loader, which receives a fresh instance on every call.
+ */
+const defaultPlugin = createPlugin();
+export const plugin = Object.assign(
+  () => createPlugin(),
+  defaultPlugin,
+) as (() => DashboardPlugin) & DashboardPlugin;
+export const logs = (): LogRecord[] => defaultPlugin.logs();
+export const url = (): string => defaultPlugin.url();
+export default createPlugin;

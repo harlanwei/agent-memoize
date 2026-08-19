@@ -654,6 +654,25 @@ describe("dynamic import of external plugins", () => {
     expect(r.primaryDb.id).toBe("agent-memoize-memory-db");
   });
 
+  it("creates a fresh instance from a named external factory", async () => {
+    const dirA = await tmpDir();
+    const dirB = await tmpDir();
+    const mod = path.join(dirA, "factory.mjs");
+    await fs.writeFile(
+      mod,
+      "export const plugin = () => ({ id: 'factory', version: '1', type: 'filter', async init(ctx) { this.root = ctx.root; }, async filter(_q, c) { return c; } });",
+    );
+    await writeConfig(dirA, { ...REQUIRED, filters: [{ id: mod }] });
+    await writeConfig(dirB, { ...REQUIRED, filters: [{ id: mod }] });
+    const [a, b] = await Promise.all([
+      Registry.create({ root: dirA }),
+      Registry.create({ root: dirB }),
+    ]);
+    expect(a.filters[0]).not.toBe(b.filters[0]);
+    expect((a.filters[0] as any).root).toBe(dirA);
+    expect((b.filters[0] as any).root).toBe(dirB);
+  });
+
   it("passes options to a plugin loaded by absolute path", async () => {
     const dir = await tmpDir();
     let seen: unknown;

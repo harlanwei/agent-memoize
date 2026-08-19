@@ -27,7 +27,7 @@ export function createPlugin(): ProducerPlugin {
       );
     },
 
-    async lintSources(_root, sources, matched) {
+    async lintSources(_root, _sources, matched) {
       if (matched.length > WIDE_GLOB_THRESHOLD) {
         return [
           "sources matched " +
@@ -35,7 +35,7 @@ export function createPlugin(): ProducerPlugin {
             " files; a wide glob makes this entry stale easily — prefer precise paths",
         ];
       }
-      return sources.length === 0 ? [] : [];
+      return [];
     },
   };
 }

@@ -5,6 +5,7 @@ import { updateEntry } from "../src/service.js";
 import { computeStatusForRoot as computeStatus } from "../src/status.js";
 import {
   claimLines,
+  compileSources,
   entryReferencesFile,
   extractTokens,
   findBrokenClaims,
@@ -46,6 +47,11 @@ afterEach(() => {
 });
 
 describe("claim extraction", () => {
+  it("reuses compiled source matchers", () => {
+    const sources = ["src/**/*.ts"];
+    expect(compileSources(sources)).toBe(compileSources(sources));
+  });
+
   it("finds tokens and claim lines in source files", async () => {
     const dir = await tmpDir();
     await write(dir, "a.ts", LOGIN_SRC);
@@ -62,6 +68,18 @@ describe("claim extraction", () => {
     expect(block).toBeDefined();
     expect(block!.line).toBe(3);
     expect(block!.end).toBe(5);
+  });
+
+  it("does not emit duplicate claims from inside an already claimed block", async () => {
+    const dir = await tmpDir();
+    await write(
+      dir,
+      "a.ts",
+      "export function login() {\n  const loginToken = createToken();\n  return loginToken;\n}\n",
+    );
+    const claims = await claimLines(dir, "a.ts", "login uses loginToken");
+    expect(claims).toHaveLength(1);
+    expect(claims[0]).toMatchObject({ line: 1, end: 4, kind: "block" });
   });
 
   it("normalizeContent strips trailing whitespace and blank lines", () => {
@@ -420,6 +438,17 @@ describe("Change B: block claim regions", () => {
     const line1 = claims.find((c) => c.line === 1);
     expect(line1).toBeDefined();
     expect(line1!.kind ?? "line").toBe("line");
+  });
+
+  it("ignores braces before a multi-line block-comment terminator", async () => {
+    const dir = await tmpDir();
+    await write(
+      dir,
+      "a.ts",
+      "export function login() {\n  /* comment\n     } */\n  return login();\n}\n",
+    );
+    const claims = await claimLines(dir, "a.ts", "login function");
+    expect(claims[0]).toMatchObject({ line: 1, end: 5, kind: "block" });
   });
 });
 
