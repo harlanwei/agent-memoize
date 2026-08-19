@@ -53,14 +53,9 @@ ledger 按**组**组织——每个 `ledgers` 条目可以是单个 ledger 或�
 {
   "version": 1,
   "plugins": {
-    "producers": [{ "id": "@naevic/agent-memoize/agent-producer" }],
-    "writers": [{ "id": "@naevic/agent-memoize/markdown-writer" }],
-    "ledgers": [{ "id": "@naevic/agent-memoize/file-ledger" }],
-    "filters": [{ "id": "@naevic/agent-memoize/stale-filter" }],
     "organizers": [
       { "id": "@naevic/agent-memoize/dream-organizer", "options": { "threshold": 15 } }
-    ],
-    "observers": []
+    ]
   }
 }
 ```
@@ -77,11 +72,6 @@ npm install -g @naevic/agent-memoize-plugin-log-observer
 {
   "version": 1,
   "plugins": {
-    "producers": [{ "id": "@naevic/agent-memoize/agent-producer" }],
-    "writers": [{ "id": "@naevic/agent-memoize/markdown-writer" }],
-    "ledgers": [{ "id": "@naevic/agent-memoize/file-ledger" }],
-    "filters": [{ "id": "@naevic/agent-memoize/stale-filter" }],
-    "organizers": [{ "id": "@naevic/agent-memoize/dream-organizer" }],
     "observers": [
       { "id": "@naevic/agent-memoize-plugin-log-observer", "options": { "port": 8888 } }
     ]

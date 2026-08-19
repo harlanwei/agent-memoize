@@ -53,14 +53,9 @@ Ledgers are organized into **groups** — each `ledgers` entry is either a singl
 {
   "version": 1,
   "plugins": {
-    "producers": [{ "id": "@naevic/agent-memoize/agent-producer" }],
-    "writers": [{ "id": "@naevic/agent-memoize/markdown-writer" }],
-    "ledgers": [{ "id": "@naevic/agent-memoize/file-ledger" }],
-    "filters": [{ "id": "@naevic/agent-memoize/stale-filter" }],
     "organizers": [
       { "id": "@naevic/agent-memoize/dream-organizer", "options": { "threshold": 15 } }
-    ],
-    "observers": []
+    ]
   }
 }
 ```
@@ -77,11 +72,6 @@ npm install -g @naevic/agent-memoize-plugin-log-observer
 {
   "version": 1,
   "plugins": {
-    "producers": [{ "id": "@naevic/agent-memoize/agent-producer" }],
-    "writers": [{ "id": "@naevic/agent-memoize/markdown-writer" }],
-    "ledgers": [{ "id": "@naevic/agent-memoize/file-ledger" }],
-    "filters": [{ "id": "@naevic/agent-memoize/stale-filter" }],
-    "organizers": [{ "id": "@naevic/agent-memoize/dream-organizer" }],
     "observers": [
       { "id": "@naevic/agent-memoize-plugin-log-observer", "options": { "port": 8888 } }
     ]
