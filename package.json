@@ -3,6 +3,10 @@
   "version": "0.2.1",
   "description": "Shared project-memory MCP server for AI coding agents (Claude Code, Codex, ...)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harlanwei/agent-memoize.git"
+  },
   "type": "module",
   "main": "dist/exports.js",
   "types": "dist/exports.d.ts",
