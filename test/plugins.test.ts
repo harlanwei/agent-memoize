@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Registry } from "../src/plugins/registry.js";
+import { Registry, toolPromptSections } from "../src/plugins/registry.js";
 import { invalidateCtx, recallCtx, statusCtx, updateEntryCtx } from "../src/service.js";
 import type { ServiceContext } from "../src/service.js";
 import { tmpDir, write } from "./helpers.js";
@@ -453,10 +453,27 @@ describe("ordering and lifecycle", () => {
 describe("producer, writer and filter plugins", () => {
   it("agent-producer describes itself as a source of truth that spawns a subagent", () => {
     const producer = createAgentDs();
-    const description = producer.describeUpdate?.() ?? "";
+    const description = producer.prompts?.update ?? "";
     expect(description).toContain("Source of truth");
     expect(description).toContain("spawn a subagent");
     expect(description).toContain("explore the project around this entry's topic");
+  });
+
+  it("toolPromptSections collects snippets from every plugin category", () => {
+    const mk = (type: string, id: string, prompts: unknown) =>
+      ({ id, version: "1", type, prompts }) as any;
+    const sections = toolPromptSections([
+      mk("ledger", "db", undefined),
+      mk("producer", "p", { update: "u-p" }),
+      mk("writer", "w1", { update: "u-w1" }),
+      mk("filter", "f", { recall: "r-f" }),
+      mk("organizer", "o", { status: "s-o" }),
+      mk("observer", "ob", { invalidate: "i-ob" }),
+    ]);
+    expect(sections.update).toEqual(["## Producer guidance (p)\nu-p", "## Writer guidance (w1)\nu-w1"]);
+    expect(sections.recall).toEqual(["## Filter guidance (f)\nr-f"]);
+    expect(sections.status).toEqual(["## Organizer guidance (o)\ns-o"]);
+    expect(sections.invalidate).toEqual(["## Observer guidance (ob)\ni-ob"]);
   });
 
   it("producer processUpdate can transform and reject input", async () => {
@@ -509,7 +526,7 @@ describe("producer, writer and filter plugins", () => {
       id: "fmt-a",
       version: "1",
       type: "writer",
-      prompt: "produce format a",
+      prompts: { update: "produce format a" },
       render(entry: any) {
         return "RENDERED: " + entry.content;
       },
@@ -518,7 +535,7 @@ describe("producer, writer and filter plugins", () => {
       id: "fmt-b",
       version: "1",
       type: "writer",
-      prompt: "produce annotation b",
+      prompts: { update: "produce annotation b" },
       render(entry: any) {
         return { wordCount: entry.content.split(" ").length };
       },

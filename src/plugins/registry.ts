@@ -425,6 +425,37 @@ function resolveSpecifier(id: string, root: string): string {
   }
 }
 
+// ---------- prompt snippet injection ----------
+
+/** Core tools whose descriptions plugins can append guidance to via `prompts`. */
+export const PROMPT_TARGETS = ["status", "recall", "update", "invalidate"] as const;
+
+/**
+ * Group the `prompts` snippets of every enabled plugin (any category) by
+ * target tool, preserving init order (ledgers first). Each snippet becomes a
+ * "## <Category> guidance (<plugin id>)" section of that tool's description.
+ */
+export function toolPromptSections(plugins: BasePlugin[]): Record<
+  (typeof PROMPT_TARGETS)[number],
+  string[]
+> {
+  const sections = {
+    status: [],
+    recall: [],
+    update: [],
+    invalidate: [],
+  } as Record<(typeof PROMPT_TARGETS)[number], string[]>;
+  const label = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+  for (const p of plugins) {
+    if (!p.prompts) continue;
+    for (const op of PROMPT_TARGETS) {
+      const text = p.prompts[op];
+      if (text) sections[op].push(`## ${label(p.type)} guidance (${p.id})\n${text}`);
+    }
+  }
+  return sections;
+}
+
 // ---------- per-root default registry (used by service/status entry points) ----------
 
 const registryCache = new Map<string, Promise<Registry>>();

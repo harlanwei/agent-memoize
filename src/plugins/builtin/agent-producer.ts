@@ -14,8 +14,8 @@ export function createPlugin(): ProducerPlugin {
     version: "1.0.0",
     type: "producer",
 
-    describeUpdate() {
-      return (
+    prompts: {
+      update:
         "Source of truth: kind=file memories must be produced from the project, " +
         "not assumed. Before calling memoize_update for a kind=file entry, spawn a " +
         "subagent with the goal to explore the project around this entry's topic and " +
@@ -23,8 +23,7 @@ export function createPlugin(): ProducerPlugin {
         "kind=decision entries are sourced from the user's decisions/preferences and " +
         "are never invalidated by file changes. " +
         "Prefer precise paths over wide globs (src/auth/login.ts over " +
-        "src/auth/**) to keep memories fresh."
-      );
+        "src/auth/**) to keep memories fresh.",
     },
 
     async lintSources(_root, _sources, matched) {

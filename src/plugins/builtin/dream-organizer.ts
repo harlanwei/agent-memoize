@@ -32,6 +32,17 @@ export function createPlugin(): OrganizerPlugin {
     version: "1.0.0",
     type: "organizer",
 
+    prompts: {
+      status:
+        "When a memoize_status result contains a `dreaming` section, enough stale/suspended " +
+        "memories have accumulated to be worth reorganizing (a \"dream\"). Spawn subagents and " +
+        "assign each a share of the entries listed there; every subagent recalls its entries, " +
+        "verifies each against its current sources, merges overlapping ones, and rewrites them " +
+        "into concise form, then calls memoize_update per entry (kind=file, with sources) to " +
+        "refresh baselines. Skip entries that are no longer worth keeping by calling " +
+        "memoize_invalidate instead.",
+    },
+
     async init(ctx: PluginContext) {
       const t = ctx.options.threshold;
       threshold = typeof t === "number" && Number.isFinite(t) && t > 0 ? t : DEFAULT_THRESHOLD;

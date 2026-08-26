@@ -205,6 +205,11 @@ describe("organizer plugin type", () => {
 });
 
 describe("dreaming plugin", () => {
+  it("exposes its guidance as a prompt for the memoize_status description", () => {
+    const p = createDreaming();
+    expect(p.prompts?.status).toContain("dreaming");
+  });
+
   it("stays quiet below the threshold (default 15)", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");

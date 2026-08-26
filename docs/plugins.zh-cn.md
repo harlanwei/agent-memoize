@@ -9,11 +9,13 @@
 | 类别 | 作用 |
 | --- | --- |
 | `producers` | 事实来源（sources of truth）：生成记忆所依据的事实（truth），或告诉主 agent 如何生成，并把结果交给主 agent；也可以注册额外的 MCP 工具（例如基于 LSP 的分析） |
-| `writers` | 定义记忆的表示形式，并把用于产出该形式的 agent 指令注入到 `memoize_update` 的描述中。配置中的第一个 writer 是主写入器：它的 `render` 决定召回内容的形态，其余 writer 只做标注 |
+| `writers` | 定义记忆的表示形式。配置中的第一个 writer 是主写入器：它的 `render` 决定召回内容的形态，其余 writer 只做标注 |
 | `ledgers` | 持久化条目和基线。ledger 按组组织——召回按顺序尝试各组（组内并行查询，排在前面的胜出）；写入只进入第一个 ledger |
 | `filters` | 检索策略：对召回候选进行把关、排序、丢弃或标注。多个 filter 按配置顺序串联 |
 | `organizers` | 在操作结果（`status` / `recall` / `update` / `invalidate`）返回给 agent 之前对其进行处理，以便给 agent 额外指引——例如是否应更新记忆。插件按配置顺序串联，每个插件都能看到上一个插件的输出 |
 | `observers` | 可观测性：记忆被创建/刷新时触发 `onMemoryCreated`，agent 召回记忆时触发 `onMemoryAccessed`。钩子是尽力而为的——失败只记录日志，绝不导致致命错误 |
+
+任何已启用的插件——无论属于哪个类别——都可以通过 `prompts` 字段（`{ status?, recall?, update?, invalidate? }`）携带提示片段。只要插件处于启用状态，每个片段就会以 `## <Category> guidance (<plugin id>)` 小节的形式追加到对应 MCP 工具（`memoize_status` / `memoize_recall` / `memoize_update` / `memoize_invalidate`）的描述中。这让插件专属的 agent 指引保持动态：只在插件被配置时存在，不会向 AGENTS.md 或其他工作流文件写入任何内容。
 
 当 agent 需要新信息时：
 1. 从 *producers* 获取事实（truth）
@@ -47,7 +49,7 @@ ledger 按**组**组织——每个 `ledgers` 条目可以是单个 ledger 或�
 
 ### Organizer 插件
 
-**`@naevic/agent-memoize/dream-organizer`**（内置，默认）——当过期/挂起的记忆累积到可配置的数量（默认 15 条）时，`memoize_status` 会额外返回一个 `dreaming` 部分，指示 agent 派生子 agent，对照这些记忆的当前源文件逐一验证，并把它们重组成更精简的形式。它开箱即用；如需调整阈值，可以通过 options 配置：
+**`@naevic/agent-memoize/dream-organizer`**（内置，默认）——当过期/挂起的记忆累积到可配置的数量（默认 15 条）时，`memoize_status` 会额外返回一个 `dreaming` 部分，指示 agent 派生子 agent，对照这些记忆的当前源文件逐一验证，并把它们重组成更精简的形式。只要该插件处于启用状态，它的指引还会被追加到 `memoize_status` 的工具描述中，agent 因此知道如何响应 `dreaming`——不会向 AGENTS.md 或其他工作流文件写入任何内容。它开箱即用；如需调整阈值，可以通过 options 配置：
 
 ```json
 {
@@ -133,6 +135,8 @@ export const plugin: LedgerPlugin = {
 ```
 
 `Entry` 和 `Manifest` 是核心数据契约（`src/types.ts`）：producers 生成写入条目所依据的 truth，writers 塑造 `entry.content`，ledgers 存储条目，filters 对它们排序。
+
+任何类别的插件都可以设置 `prompts`（`{ status?, recall?, update?, invalidate? }`），在其启用期间把自身指引追加到对应工具的描述中——参见类别表格上方的说明。
 
 ### 使用未发布的本地插件
 

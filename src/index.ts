@@ -12,7 +12,7 @@ import {
   installedAgents,
   type InjectAction,
 } from "./inject.js";
-import { Registry } from "./plugins/registry.js";
+import { Registry, toolPromptSections } from "./plugins/registry.js";
 
 const { version: VERSION } = createRequire(import.meta.url)("../package.json") as {
   version: string;
@@ -153,19 +153,18 @@ const fail = (e: unknown) => ({
   isError: true as const,
 });
 
-const primaryFormat = registry.writers[0];
-const promptSections: string[] = [];
-if (primaryFormat?.prompt) {
-  promptSections.push(`## Memory format (${primaryFormat.id})\n${primaryFormat.prompt}`);
-}
-for (const f of registry.writers.slice(1)) {
-  if (f.prompt) promptSections.push(`## Format annotation (${f.id})\n${f.prompt}`);
-}
-for (const ds of registry.producers) {
-  const t = ds.describeUpdate?.();
-  if (t) promptSections.push(`## Source of truth (${ds.id})\n${t}`);
-}
-const updateExtras = promptSections.length > 0 ? `\n\n${promptSections.join("\n\n")}` : "";
+const sections = toolPromptSections([
+  ...registry.ledgers,
+  ...registry.producers,
+  ...registry.writers,
+  ...registry.filters,
+  ...registry.organizers,
+  ...registry.observers,
+]);
+const extras = (op: keyof typeof sections) => {
+  const s = sections[op];
+  return s.length > 0 ? `\n\n${s.join("\n\n")}` : "";
+};
 
 server.registerTool(
   "memoize_status",
@@ -173,7 +172,7 @@ server.registerTool(
     description:
       "Project-memory staleness check. Call once at session start, before exploring the codebase. " +
       "Returns which files changed externally and which memory entries are stale, verified " +
-      "(auto re-baselined), or suspended (sources unresolved).",
+      "(auto re-baselined), or suspended (sources unresolved)." + extras("status"),
     inputSchema: {},
   },
   async () => {
@@ -192,7 +191,7 @@ server.registerTool(
       "Read project memories. Without `topic`: returns an index of entries (names, summaries, " +
       "staleness — no content). With `topic`: returns the entry content if fresh or verified; " +
       "if stale, returns the changed source files to re-read instead. Call before analyzing " +
-      "project files.",
+      "project files." + extras("recall"),
     inputSchema: {
       topic: z.string().optional().describe("entry name, e.g. \"modules/auth\""),
     },
@@ -215,8 +214,7 @@ server.registerTool(
       "kind=\"file\" describes code and requires `sources` (project-relative paths/globs it is " +
       "derived from) — it is invalidated automatically when those files change. " +
       "kind=\"decision\" records user decisions/preferences, takes no sources, and is never " +
-      "invalidated by file changes." +
-      updateExtras,
+      "invalidated by file changes." + extras("update"),
     inputSchema: {
       name: z.string().describe("lowercase path-like name, e.g. \"modules/auth\""),
       content: z.string().describe("memory body in the configured format"),
@@ -244,7 +242,7 @@ server.registerTool(
   {
     description:
       "Delete memory entries. With `name`: deletes that entry. Without: wipes the whole shared " +
-      "store. Requires confirm=true.",
+      "store. Requires confirm=true." + extras("invalidate"),
     inputSchema: {
       name: z.string().optional(),
       confirm: z.boolean().describe("must be true; the store is shared across agents"),

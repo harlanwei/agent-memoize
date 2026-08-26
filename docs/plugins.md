@@ -9,11 +9,13 @@ Plugins are categorized into six categories:
 | Category | What it does |
 | --- | --- |
 | `producers` | Sources of truth: generate the truth a memory is derived from (or tell the main agent how to generate it) and hand that truth to the main agent; may also register extra MCP tools (e.g. LSP analysis) |
-| `writers` | Defines the memory representation and injects the agent instruction that produces it (into the `memoize_update` description). First writer in the config is primary: its `render` shapes recall content; others annotate |
+| `writers` | Defines the memory representation. First writer in the config is primary: its `render` shapes recall content; others annotate |
 | `ledgers` | Persists entries and baselines. Ledgers are organized into groups — recall tries groups in order (a group's ledgers are queried in parallel, the front one wins on contradiction); writes go to the first ledger only |
 | `filters` | Retrieval strategy: gate, rank, drop, or annotate recall candidates. Filters chain in config order |
 | `organizers` | Runs on an operation's result (`status` / `recall` / `update` / `invalidate`) right before it is returned to the agent, so it can give the agent extra guidance — e.g. whether to update memories. Plugins chain in config order; each sees the previous one's output |
 | `observers` | Observability: `onMemoryCreated` fires when a memory is created/refreshed, `onMemoryAccessed` when an agent recalls memories. Hooks are best-effort — failures are logged, never fatal |
+
+Any enabled plugin — regardless of category — can carry prompt snippets in a `prompts` field (`{ status?, recall?, update?, invalidate? }`). While the plugin is enabled, each snippet is appended as a `## <Category> guidance (<plugin id>)` section to the description of the matching MCP tool (`memoize_status`, `memoize_recall`, `memoize_update`, `memoize_invalidate`). This keeps plugin-specific agent guidance dynamic: it exists only while the plugin is configured, and nothing is written into AGENTS.md or other workflow files.
 
 When the agent needs new information, it:
 1. gets truth from *producers*
@@ -47,7 +49,7 @@ Ledgers are organized into **groups** — each `ledgers` entry is either a singl
 
 ### Organizer plugins
 
-**`@naevic/agent-memoize/dream-organizer`** (built-in, default) — once stale/suspended memories accumulate to a configurable amount (default 15), `memoize_status` returns an extra `dreaming` section telling the agent to spawn subagents that verify the memories against their current sources and reorganize them into a more concise format. It runs out of the box; to change the threshold, configure it with options:
+**`@naevic/agent-memoize/dream-organizer`** (built-in, default) — once stale/suspended memories accumulate to a configurable amount (default 15), `memoize_status` returns an extra `dreaming` section telling the agent to spawn subagents that verify the memories against their current sources and reorganize them into a more concise format. While the plugin is enabled, its guidance is also appended to the `memoize_status` tool description, so agents know how to act on `dreaming` — nothing is written into AGENTS.md or other workflow files. It runs out of the box; to change the threshold, configure it with options:
 
 ```json
 {
@@ -135,6 +137,10 @@ export const plugin: LedgerPlugin = {
 `Entry` and `Manifest` are the core data contract (`src/types.ts`): producers generate the
 truth that entries are written from, writers shape `entry.content`, ledgers store them, and
 filters rank them.
+
+A plugin of any category may set `prompts` (`{ status?, recall?, update?, invalidate? }`) to
+have its guidance appended to the matching tool descriptions while it is enabled — see the
+note above the category table.
 
 ### Using local, unpublished plugins
 

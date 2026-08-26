@@ -71,6 +71,14 @@ export interface BasePlugin {
   version: string;
   init?(ctx: PluginContext): Promise<void>;
   shutdown?(): Promise<void>;
+  /**
+   * Prompt snippets injected into the matching MCP tool descriptions while
+   * this plugin is enabled — any category can provide them. Keys are the
+   * operations of the core tools (memoize_status / memoize_recall /
+   * memoize_update / memoize_invalidate); each snippet becomes a
+   * "## <Category> guidance (<plugin id>)" section.
+   */
+  prompts?: Partial<Record<OrganizerOperation, string>>;
 }
 
 /**
@@ -83,8 +91,6 @@ export interface ProducerPlugin extends BasePlugin {
   type: "producer";
   /** Normalize the truth submitted in an update; return null to reject it. */
   processUpdate?(args: UpdateArgs): Promise<UpdateArgs | null>;
-  /** Guidance appended to the memoize_update tool description: how to produce the truth for an update. */
-  describeUpdate?(): string;
   /** Lint sources at update time; returned strings become warnings. */
   lintSources?(root: string, sources: string[], matched: string[]): Promise<string[]> | string[];
 }
@@ -101,11 +107,9 @@ export interface LedgerPlugin extends BasePlugin {
   withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
-/** Defines the memory representation and the agent instruction that produces it. */
+/** Defines the memory representation; the instruction producing it rides on `prompts.update`. */
 export interface WriterPlugin extends BasePlugin {
   type: "writer";
-  /** Agent instruction: how to process input data into this format. */
-  prompt: string;
   /** Optional output transform; the primary writer may shape recall content. */
   render?(entry: Entry): unknown;
   /** Optional canonicalization of content on write. */
