@@ -1,0 +1,66 @@
+name: Release
+
+# Publishes to npm whenever the version in package.json changes on main.
+# The registry check (not a path filter) is what detects the change, so
+# edits to package.json that keep the version (dependency bumps, etc.)
+# never trigger a release.
+#
+# Auth uses npm trusted publishing (OIDC), so no NPM_TOKEN secret is
+# stored. The package must list this repo as a trusted publisher on
+# npmjs.com with workflow filename "release.yml" and environment "release".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # lets the job mint the OIDC token npm verifies
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release # must match the trusted-publisher entry on npmjs.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+
+      # Built-in trusted publishing needs npm >= 11.5.1; bundled npm can lag
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Check if version is new on npm
+        id: version
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION is already published, skipping release"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION is new, releasing"
+          fi
+
+      - name: Install dependencies
+        if: steps.version.outputs.new == 'true'
+        run: npm ci
+
+      - name: Build and test
+        if: steps.version.outputs.new == 'true'
+        run: npm test
+
+      - name: Publish
+        if: steps.version.outputs.new == 'true'
+        run: npm publish
