@@ -36,11 +36,12 @@ export function createPlugin(): OrganizerPlugin {
       status:
         "When a memoize_status result contains a `dreaming` section, enough stale/suspended " +
         "memories have accumulated to be worth reorganizing (a \"dream\"). Spawn subagents and " +
-        "assign each a share of the entries listed there; every subagent recalls its entries, " +
-        "verifies each against its current sources, merges overlapping ones, and rewrites them " +
-        "into concise form, then calls memoize_update per entry (kind=file, with sources) to " +
-        "refresh baselines. Skip entries that are no longer worth keeping by calling " +
-        "memoize_invalidate instead.",
+        "assign each a share of the entries listed there; every subagent recalls its entries with " +
+        "includeStale=true (stale bodies are withheld by default, and the subagent needs the old " +
+        "text to rewrite it), verifies each against its current sources, merges overlapping ones, " +
+        "and rewrites them into concise form, then calls memoize_update per entry (kind=file, " +
+        "with sources) to refresh baselines. Skip entries that are no longer worth keeping by " +
+        "calling memoize_invalidate instead.",
     },
 
     async init(ctx: PluginContext) {
@@ -58,8 +59,9 @@ export function createPlugin(): OrganizerPlugin {
       const count = stale.length + suspended.length;
       if (count < threshold) return;
 
+      // `dreaming` leads the payload: the rest is a long list of changed files
+      // and broken claims that would otherwise bury it.
       return {
-        ...(result as object),
         dreaming: {
           count,
           threshold,
@@ -67,10 +69,11 @@ export function createPlugin(): OrganizerPlugin {
           suspended,
           guidance:
             `${count} memories need attention (threshold ${threshold}): spawn subagents to dream. ` +
-            "Each subagent verifies the memories it is assigned against their current sources, " +
-            "merges overlapping entries, and rewrites them into concise form. Then call " +
-            "memoize_update per entry to refresh its baseline.",
+            "Each subagent recalls its entries with includeStale=true, verifies them against their " +
+            "current sources, merges overlapping entries, and rewrites them into concise form. " +
+            "Then call memoize_update per entry to refresh its baseline.",
         },
+        ...(result as object),
       };
     },
   };

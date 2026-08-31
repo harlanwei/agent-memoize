@@ -16,7 +16,7 @@
 
 - 每条记忆都会声明它派生自哪些文件。
 - 会话开始时，MCP 服务器会做一次开销很低的检查，报告哪些记忆源文件发生了变化、哪些记忆已过期。
-- 过期记忆绝不会被提供给 agent：MCP 服务器会返回变更的源文件，让 agent 重新阅读，所以最坏情况只是回退到 agent 的默认行为。
+- 过期记忆绝不会被当作事实提供给 agent：MCP 服务器会返回变更的源文件，让 agent 重新阅读，所以最坏情况只是回退到 agent 的默认行为。需要重写旧内容时，`memoize_recall(topic, includeStale=true)` 会一并返回已过期的正文。
 - 记录用户决策的记忆永远不会因文件变更而失效，只有用户自己推翻它才会失效。
 
 记忆内容严格按需进入 agent 的上下文，且工具输出很精简，不使用记忆库时几乎不占用上下文。
@@ -219,8 +219,8 @@ agent-memoize --inject global:claude,codex   # ……或只注入列出的 agent
 
 | 工具 | 用途 |
 | --- | --- |
-| `memoize_status()` | 会话开始时对记忆源文件的检查。返回 `{ state, mode, changedFiles, addedFiles, deletedFiles, cosmeticChanges, verifiedEntries, suspendedEntries, staleEntries, invalidEntries, truncated }`。文件数组有数量上限；`truncated=true` 表示仍有更多变更。`state`：`empty` / `fresh` / `stale`。 |
-| `memoize_recall(topic?)` | 不带 topic：返回条目索引（名称、摘要、每条目的 `status`：`fresh` / `verified` / `stale` / `suspended`——不含内容）。带 topic：若条目为 fresh 或 verified 则返回条目内容，否则返回需要重读的变更源文件（已收窄到真正导致该记忆失效的文件）。 |
+| `memoize_status()` | 会话开始时对记忆源文件的检查。返回 `{ dreaming?, state, mode, changedFiles, addedFiles, deletedFiles, cosmeticChanges, verifiedEntries, suspendedEntries, staleEntries, invalidEntries, truncated }`。`dreaming` 排在结果最前面，只在过期/挂起记忆累积到一定数量（默认 15 条）时出现——参见 [Organizer 插件](docs/plugins.zh-cn.md#organizer-插件)。文件数组有数量上限；`truncated=true` 表示仍有更多变更。`state`：`empty` / `fresh` / `stale`。 |
+| `memoize_recall(topic?, includeStale?)` | 不带 topic：返回条目索引（名称、摘要、每条目的 `status`：`fresh` / `verified` / `stale` / `suspended`——不含内容）。带 topic：若条目为 fresh 或 verified 则返回条目内容，否则返回需要重读的变更源文件（已收窄到真正导致该记忆失效的文件）。传 `includeStale=true` 会额外返回过期/挂起条目的已存储正文，以便重写。 |
 | `memoize_update(name, content, kind, sources?, summary?, author?)` | 创建/刷新条目，并重建其指纹基线。`kind="file"` 必须提供 `sources`（项目相对路径/glob）。 |
 | `memoize_invalidate(name?, confirm)` | 删除单个条目；省略 `name` 时删除整个记忆库。必须传 `confirm=true`——记忆库是共享的。 |
 

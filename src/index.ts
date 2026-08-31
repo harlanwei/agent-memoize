@@ -190,16 +190,24 @@ server.registerTool(
     description:
       "Read project memories. Without `topic`: returns an index of entries (names, summaries, " +
       "staleness — no content). With `topic`: returns the entry content if fresh or verified; " +
-      "if stale, returns the changed source files to re-read instead. Call before analyzing " +
+      "if stale, returns the changed source files to re-read instead — pass includeStale=true " +
+      "to also get the stored (outdated) body, e.g. to rewrite it. Call before analyzing " +
       "project files." + extras("recall"),
     inputSchema: {
       topic: z.string().optional().describe("entry name, e.g. \"modules/auth\""),
+      includeStale: z
+        .boolean()
+        .optional()
+        .describe(
+          "also return the stored body of a stale/suspended entry (default false: stale " +
+            "content is never served as truth)",
+        ),
     },
   },
-  async ({ topic }) => {
+  async ({ topic, includeStale }) => {
     try {
       const accessor = server.server.getClientVersion()?.name ?? "unknown";
-      return ok(await recallCtx({ ...ctx, accessor }, topic));
+      return ok(await recallCtx({ ...ctx, accessor }, topic, includeStale));
     } catch (e) {
       return fail(e);
     }

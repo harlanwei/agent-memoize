@@ -16,7 +16,7 @@ The hard part is staleness: you (or a `git pull`, or another agent) can change t
 
 - Every memory declares the files it was derived from.
 - At session start the MCP server does one cheap check that reports which memory source files changed and which memories are stale.
-- Stale memories are never served: the MCP server returns the changed source files and ask the agent to re-read instead, so the worst case degrades to what the agent does today.
+- Stale memories are never served as truth: the MCP server returns the changed source files and ask the agent to re-read instead, so the worst case degrades to what the agent does today. `memoize_recall(topic, includeStale=true)` also returns the outdated body, for when you need to rewrite it.
 - Memories recording user decisions are never invalidated by file changes, only by the user contradicting them.
 
 Memory content enters the agent's context strictly on demand, and tool output is compact. The store costs almost no context when unused.
@@ -222,8 +222,8 @@ The default configuration should suffice for most use cases. If you need more fi
 
 | Tool | Purpose |
 | --- | --- |
-| `memoize_status()` | Session-start check for memory source files. Returns `{ state, mode, changedFiles, addedFiles, deletedFiles, cosmeticChanges, verifiedEntries, suspendedEntries, staleEntries, invalidEntries, truncated }`. File arrays are capped; `truncated=true` means more changes exist. `state`: `empty` / `fresh` / `stale`. |
-| `memoize_recall(topic?)` | No topic: index of entries (names, summaries, per-entry `status`: `fresh` / `verified` / `stale` / `suspended` — no content). With topic: entry content if fresh or verified, else the changed source files to re-read (narrowed to the files that actually break the memory). |
+| `memoize_status()` | Session-start check for memory source files. Returns `{ dreaming?, state, mode, changedFiles, addedFiles, deletedFiles, cosmeticChanges, verifiedEntries, suspendedEntries, staleEntries, invalidEntries, truncated }`. `dreaming` leads the result and is present only once enough stale/suspended memories have accumulated (default 15) — see [Organizer plugins](docs/plugins.md#organizer-plugins). File arrays are capped; `truncated=true` means more changes exist. `state`: `empty` / `fresh` / `stale`. |
+| `memoize_recall(topic?, includeStale?)` | No topic: index of entries (names, summaries, per-entry `status`: `fresh` / `verified` / `stale` / `suspended` — no content). With topic: entry content if fresh or verified, else the changed source files to re-read (narrowed to the files that actually break the memory). `includeStale=true` additionally returns the stored body of a stale/suspended entry, so it can be rewritten. |
 | `memoize_update(name, content, kind, sources?, summary?, author?)` | Create/refresh an entry and re-baseline its fingerprints. `kind="file"` requires `sources` (project-relative paths/globs). |
 | `memoize_invalidate(name?, confirm)` | Delete one entry, or the whole store when `name` is omitted. Requires `confirm=true` — the store is shared. |
 

@@ -266,6 +266,29 @@ describe("dreaming plugin", () => {
     });
   });
 
+  it("puts dreaming first so a long status payload cannot bury it", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.txt", "hello\n");
+    const r = await makeRegistry(dir, { organizers: [createDreaming()] }, {
+      plugins: {
+        ...defaultPlugins,
+        organizers: [{ id: "@naevic/agent-memoize/dream-organizer", options: { threshold: 1 } }],
+      },
+    });
+    const ctx = ctxFor(r, dir);
+    await updateEntryCtx(ctx, {
+      name: "m1",
+      kind: "file",
+      sources: ["a.txt"],
+      content: "c1",
+      author: "t",
+    });
+    await write(dir, "a.txt", "changed\n");
+    const st = (await statusCtx(ctx)) as any;
+    expect(Object.keys(st)[0]).toBe("dreaming");
+    expect(JSON.stringify(st).startsWith('{"dreaming":')).toBe(true);
+  });
+
   it("counts suspended memories and leaves other operations untouched", async () => {
     const dir = await tmpDir();
     await write(dir, "a.txt", "hello\n");

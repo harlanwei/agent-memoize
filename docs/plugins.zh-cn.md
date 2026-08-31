@@ -45,11 +45,11 @@ ledger 按**组**组织——每个 `ledgers` 条目可以是单个 ledger 或�
 
 ### Filter 插件
 
-**`@naevic/agent-memoize/stale-filter`**（内置，默认）——过期（staleness）把关的锚点：召回时绝不会返回过期内容，这个插件就是其他 filter 围绕其组合的链路位置。
+**`@naevic/agent-memoize/stale-filter`**（内置，默认）——过期（staleness）把关的锚点：召回时绝不会把过期内容当作事实返回——过期或挂起的 topic 只返回发生变化的源文件——这个插件就是其他 filter 围绕其组合的链路位置。需要重写旧内容时，给 `memoize_recall` 传 `includeStale=true` 可以连带取得已过期的正文。
 
 ### Organizer 插件
 
-**`@naevic/agent-memoize/dream-organizer`**（内置，默认）——当过期/挂起的记忆累积到可配置的数量（默认 15 条）时，`memoize_status` 会额外返回一个 `dreaming` 部分，指示 agent 派生子 agent，对照这些记忆的当前源文件逐一验证，并把它们重组成更精简的形式。只要该插件处于启用状态，它的指引还会被追加到 `memoize_status` 的工具描述中，agent 因此知道如何响应 `dreaming`——不会向 AGENTS.md 或其他工作流文件写入任何内容。它开箱即用；如需调整阈值，可以通过 options 配置：
+**`@naevic/agent-memoize/dream-organizer`**（内置，默认）——当过期/挂起的记忆累积到可配置的数量（默认 15 条）时，`memoize_status` 会额外返回一个 `dreaming` 部分，指示 agent 派生子 agent，对照这些记忆的当前源文件逐一验证，并把它们重组成更精简的形式。这个部分是结果的**第一个**键，因此不会被后面长长的变更文件与失效 claim 列表淹没。只要该插件处于启用状态，它的指引还会被追加到 `memoize_status` 的工具描述中，agent 因此知道如何响应 `dreaming`——包括必须用 `includeStale=true` 召回每条过期记忆，才能拿到它要重写的正文——不会向 AGENTS.md 或其他工作流文件写入任何内容。它开箱即用；如需调整阈值，可以通过 options 配置：
 
 ```json
 {

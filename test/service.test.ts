@@ -1,3 +1,5 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { invalidate, recall, updateEntry } from "../src/service.js";
 import { loadManifest } from "./helpers.js";
@@ -86,6 +88,47 @@ describe("recall", () => {
     expect(stale.stale).toBe(true);
     expect(stale.changedSources).toEqual(["a.txt"]);
     expect(stale.content).toBeUndefined();
+  });
+
+  it("serves a stale body only when includeStale is set", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.txt", "v1");
+    await updateEntry(dir, {
+      name: "a",
+      kind: "file",
+      sources: ["a.txt"],
+      content: "notes about a",
+      author: "t",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    await write(dir, "a.txt", "v2");
+
+    expect((await recall(dir, "a") as any).content).toBeUndefined();
+    const withBody = (await recall(dir, "a", true)) as any;
+    expect(withBody.stale).toBe(true);
+    expect(withBody.content).toContain("notes about a");
+    expect(withBody.changedSources).toEqual(["a.txt"]);
+  });
+
+  it("serves a suspended body only when includeStale is set", async () => {
+    const dir = await tmpDir();
+    await write(dir, "a.txt", "v1");
+    await updateEntry(dir, {
+      name: "a",
+      kind: "file",
+      sources: ["a.txt"],
+      content: "notes about a",
+      author: "t",
+    });
+    await fs.rm(path.join(dir, "a.txt"));
+
+    const suspended = (await recall(dir, "a")) as any;
+    expect(suspended.status).toBe("suspended");
+    expect(suspended.content).toBeUndefined();
+
+    const withBody = (await recall(dir, "a", true)) as any;
+    expect(withBody.status).toBe("suspended");
+    expect(withBody.content).toContain("notes about a");
   });
 
   it("reports unknown topics with the available list", async () => {

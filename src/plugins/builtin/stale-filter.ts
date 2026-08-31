@@ -14,10 +14,11 @@ export function createPlugin(): FilterPlugin {
     type: "filter",
     prompts: {
       recall:
-        "Stale or suspended entries are never served as content: recall without " +
-        "`topic` lists every entry with its status, and a stale topic returns the " +
-        "changed source files to re-read instead. Re-read those files, then refresh " +
-        "the entry via memoize_update.",
+        "Stale or suspended content is never served as truth: recall without `topic` " +
+        "lists every entry with its status, and a stale topic returns the changed source " +
+        "files to re-read instead. Re-read those files, then refresh the entry via " +
+        "memoize_update. Pass includeStale=true only when you need the outdated body " +
+        "itself — for example to rewrite it — and treat it as untrusted.",
     },
     async filter(_query, candidates) {
       return candidates;

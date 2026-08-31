@@ -210,7 +210,39 @@ export async function updateEntryCtx(ctx: ServiceContext, args: UpdateArgs) {
 
 // ---------- recall ----------
 
-export async function recallCtx(ctx: ServiceContext, topic?: string) {
+/**
+ * Render an entry body through the writer chain: the primary writer shapes the
+ * content, any later writer contributes an annotation under its plugin id.
+ */
+function renderEntry(
+  registry: Registry,
+  entry: Entry,
+): { content: string; format?: Record<string, unknown> } {
+  const formatAnnotations: Record<string, unknown> = {};
+  let rendered: unknown;
+  for (const f of registry.writers) {
+    const r = f.render?.(entry);
+    if (r === undefined || r === null) continue;
+    if (f === registry.writers[0]) rendered = r;
+    else formatAnnotations[f.id] = r;
+  }
+  return {
+    content: typeof rendered === "string" ? rendered : entry.content,
+    ...(Object.keys(formatAnnotations).length > 0 ? { format: formatAnnotations } : {}),
+  };
+}
+
+/**
+ * `includeStale` opts into receiving the stored body of a stale or suspended
+ * entry. Reorganizing a memory means rewriting text that already exists, so a
+ * dreaming agent needs the old body — but it is never served by default, since
+ * acting on stale content as if it were true is exactly what the gate prevents.
+ */
+export async function recallCtx(
+  ctx: ServiceContext,
+  topic?: string,
+  includeStale = false,
+) {
   const { registry } = ctx;
   let sawEntries = false;
   let firstState: StatusResult["state"] = "fresh";
@@ -309,6 +341,7 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
           c.brokenClaims && c.brokenClaims.length > 0
             ? "Memory is stale: the listed claim regions no longer match. Re-read those specific source regions and patch this entry in place via memoize_update."
             : "Memory is stale: re-read the changed source files, then call memoize_update to refresh this entry.",
+        ...(includeStale ? renderEntry(registry, c.entry) : {}),
         ...c.annotations,
       };
     } else if (c.status === "suspended") {
@@ -318,18 +351,10 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         status: "suspended" as const,
         changedSources: c.changedSources,
         hint: "Memory sources are gone or unmatched: re-check the files it describes, then call memoize_update to refresh this entry.",
+        ...(includeStale ? renderEntry(registry, c.entry) : {}),
         ...c.annotations,
       };
     } else {
-      const formatAnnotations: Record<string, unknown> = {};
-      let rendered: unknown;
-      for (const f of registry.writers) {
-        const r = f.render?.(c.entry);
-        if (r === undefined || r === null) continue;
-        if (f === registry.writers[0]) rendered = r;
-        else formatAnnotations[f.id] = r;
-      }
-      const content = typeof rendered === "string" ? rendered : c.entry.content;
       result = {
         name: c.entry.name,
         kind: c.entry.kind,
@@ -338,8 +363,7 @@ export async function recallCtx(ctx: ServiceContext, topic?: string) {
         summary: c.entry.summary,
         stale: false as const,
         status: c.status,
-        content,
-        ...(Object.keys(formatAnnotations).length > 0 ? { format: formatAnnotations } : {}),
+        ...renderEntry(registry, c.entry),
         ...c.annotations,
       };
     }
@@ -413,9 +437,9 @@ export async function updateEntry(root: string, args: UpdateArgs) {
   return updateEntryCtx({ root, registry }, args);
 }
 
-export async function recall(root: string, topic?: string) {
+export async function recall(root: string, topic?: string, includeStale = false) {
   const registry = await getRegistry(root);
-  return recallCtx({ root, registry }, topic);
+  return recallCtx({ root, registry }, topic, includeStale);
 }
 
 export async function invalidate(root: string, name: string | undefined, confirm: boolean) {

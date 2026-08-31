@@ -45,11 +45,11 @@ Ledgers are organized into **groups** — each `ledgers` entry is either a singl
 
 ### Filter plugins
 
-**`@naevic/agent-memoize/stale-filter`** (built-in, default) — the staleness gate anchor: stale content is never served from recall, and this plugin is the chain slot other filters compose around.
+**`@naevic/agent-memoize/stale-filter`** (built-in, default) — the staleness gate anchor: stale content is never served as truth from recall — a stale or suspended topic returns the changed source files instead — and this plugin is the chain slot other filters compose around. Pass `includeStale=true` to `memoize_recall` to also get the outdated body when you need to rewrite it.
 
 ### Organizer plugins
 
-**`@naevic/agent-memoize/dream-organizer`** (built-in, default) — once stale/suspended memories accumulate to a configurable amount (default 15), `memoize_status` returns an extra `dreaming` section telling the agent to spawn subagents that verify the memories against their current sources and reorganize them into a more concise format. While the plugin is enabled, its guidance is also appended to the `memoize_status` tool description, so agents know how to act on `dreaming` — nothing is written into AGENTS.md or other workflow files. It runs out of the box; to change the threshold, configure it with options:
+**`@naevic/agent-memoize/dream-organizer`** (built-in, default) — once stale/suspended memories accumulate to a configurable amount (default 15), `memoize_status` returns an extra `dreaming` section telling the agent to spawn subagents that verify the memories against their current sources and reorganize them into a more concise format. The section is the **first** key of the result, so it cannot be buried by the long lists of changed files and broken claims that follow it. While the plugin is enabled, its guidance is also appended to the `memoize_status` tool description, so agents know how to act on `dreaming` — including that they must recall each stale entry with `includeStale=true` to get the body they are meant to rewrite. Nothing is written into AGENTS.md or other workflow files. It runs out of the box; to change the threshold, configure it with options:
 
 ```json
 {
