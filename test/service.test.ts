@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { invalidate, recall, updateEntry } from "../src/service.js";
+import { invalidate, recall, storePath, updateEntry } from "../src/service.js";
 import { loadManifest } from "./helpers.js";
 import { tmpDir, write } from "./helpers.js";
 
@@ -173,5 +173,38 @@ describe("invalidate", () => {
     expect(r.ok).toBe(true);
     expect((r as any).removed.sort()).toEqual(["decisions/another", "decisions/small-prs"]);
     expect(await recall(dir)).toEqual({ state: "empty", entries: [] });
+  });
+
+  it("deletes an entry file that fails to parse", async () => {
+    const dir = await tmpDir();
+    await updateEntry(dir, decision);
+    const broken = path.join(storePath(dir), "broken.md");
+    await fs.writeFile(broken, "no front matter here\n");
+    // An unparseable file keeps the store stale but cannot be listed as an
+    // entry, so it must still be deletable by name.
+    expect(await invalidate(dir, "broken", true)).toEqual({
+      ok: true,
+      removed: ["broken"],
+    });
+    await expect(fs.readFile(broken, "utf8")).rejects.toThrow();
+  });
+
+  it("wipes entry files that fail to parse", async () => {
+    const dir = await tmpDir();
+    await updateEntry(dir, decision);
+    const broken = path.join(storePath(dir), "broken.md");
+    await fs.writeFile(broken, "no front matter here\n");
+    const r = await invalidate(dir, undefined, true);
+    expect((r as any).removed).toContain("broken");
+    await expect(fs.readFile(broken, "utf8")).rejects.toThrow();
+  });
+
+  it("still reports a name that matches no file", async () => {
+    const dir = await tmpDir();
+    await updateEntry(dir, decision);
+    expect(await invalidate(dir, "decisions/never-existed", true)).toEqual({
+      ok: false,
+      error: 'no entry "decisions/never-existed"',
+    });
   });
 });

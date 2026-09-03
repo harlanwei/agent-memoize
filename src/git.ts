@@ -12,8 +12,16 @@ export function isStorePath(rel: string): boolean {
   return rel === ".agent-memoize" || rel.startsWith(STORE_PREFIX);
 }
 
+/**
+ * Path quoting is always disabled: git escapes non-ASCII and special
+ * characters by default, and a quoted path never matches the tree, which would
+ * silently hide changes to those files from staleness detection.
+ */
 async function git(root: string, args: string[]): Promise<string> {
-  const { stdout } = await run("git", args, { cwd: root, maxBuffer: MAX_BUFFER });
+  const { stdout } = await run("git", ["-c", "core.quotePath=false", ...args], {
+    cwd: root,
+    maxBuffer: MAX_BUFFER,
+  });
   return stdout;
 }
 

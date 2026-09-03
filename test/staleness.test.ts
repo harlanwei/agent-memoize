@@ -13,6 +13,7 @@ import {
   normalizeContent,
   normalizeLine,
   storePath,
+  WorkspaceFileCache,
 } from "../src/workspace.js";
 import { tmpDir, gitRepo, commitAll, write } from "./helpers.js";
 
@@ -220,6 +221,32 @@ describe("Change A: normalized claim-line hashes", () => {
   });
 });
 
+describe("git paths git would quote", () => {
+  it("detects a committed change to a non-ASCII filename", async () => {
+    const dir = await gitRepo();
+    const file = "src/café-modül.ts";
+    await write(dir, file, "export const login = () => 1;\n");
+    await commitAll(dir, "one");
+    await updateEntry(dir, {
+      name: "modules/auth",
+      kind: "file",
+      sources: [file],
+      content: "login lives in src/café-modül.ts and returns a token.",
+      author: "test",
+    });
+
+    await write(dir, file, "export const login = () => 999;\n");
+    await commitAll(dir, "two");
+
+    // git escapes non-ASCII paths by default; a quoted path matches nothing in
+    // the tree, which used to hide the change and suspend the entry instead.
+    const s = await computeStatus(dir);
+    expect(s.staleEntries.map((e) => e.name)).toEqual(["modules/auth"]);
+    expect(s.staleEntries[0].changedSources).toEqual([file]);
+    expect(s.suspendedEntries).toEqual([]);
+  });
+});
+
 describe("claim multiplicity", () => {
   it("goes stale when one of two identical claimed lines changes", async () => {
     const dir = await tmpDir();
@@ -235,6 +262,19 @@ describe("claim multiplicity", () => {
     const s = await computeStatus(dir);
     expect(s.state).toBe("stale");
     expect(s.staleEntries[0].changedSources).toEqual(["pipelines.yml"]);
+  });
+
+  it("re-checking claims against one cache never consumes another entry's occurrence", async () => {
+    const dir = await tmpDir();
+    await write(dir, "pipelines.yml", "standard:\n  - auth\n");
+    const claims = await claimLines(dir, "pipelines.yml", "The standard pipeline includes auth.");
+    expect(claims.length).toBeGreaterThan(0);
+
+    // Per-file claim data is cached across entries, but occurrence matching
+    // consumes from the multiset, so each call needs its own counts.
+    const cache = new WorkspaceFileCache(dir);
+    expect(await findBrokenClaims(dir, "pipelines.yml", claims, false, cache)).toEqual([]);
+    expect(await findBrokenClaims(dir, "pipelines.yml", claims, false, cache)).toEqual([]);
   });
 });
 

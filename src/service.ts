@@ -395,7 +395,10 @@ export async function invalidateCtx(
   confirm: boolean,
 ) {
   const { registry } = ctx;
-  const { entries } = await registry.primaryDb.listEntries();
+  // `invalid` holds entry files that exist on disk but failed to parse. They
+  // can never be listed as entries, yet they must stay removable: a corrupt
+  // file would otherwise pin the store to "stale" with no way to delete it.
+  const { entries, invalid } = await registry.primaryDb.listEntries();
   if (name !== undefined && !isValidName(name)) {
     throw new Error(`invalid entry name "${name}"`);
   }
@@ -408,7 +411,12 @@ export async function invalidateCtx(
       wouldRemove: name ? [name] : targets.map((e) => e.name),
     };
   }
-  if (name && targets.length === 0 && !(await registry.primaryDb.readEntry(name))) {
+  if (
+    name &&
+    targets.length === 0 &&
+    !invalid.includes(name) &&
+    !(await registry.primaryDb.readEntry(name))
+  ) {
     return { ok: false as const, error: `no entry "${name}"` };
   }
 
@@ -421,8 +429,10 @@ export async function invalidateCtx(
       delete manifest.entries[name];
       await registry.primaryDb.saveManifest(manifest);
     } else {
-      for (const e of entries) {
-        if (await registry.primaryDb.deleteEntry(e.name)) removed.push(e.name);
+      // Wipe unparseable files too, or a corrupt entry survives the wipe and
+      // keeps the store stale.
+      for (const n of [...entries.map((e) => e.name), ...invalid]) {
+        if (await registry.primaryDb.deleteEntry(n)) removed.push(n);
       }
       await registry.primaryDb.saveManifest({ version: 1, entries: {} });
     }

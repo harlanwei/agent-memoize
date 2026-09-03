@@ -166,12 +166,32 @@ interface CachedFile {
   size: number;
 }
 
+/**
+ * Everything claim analysis needs from one source file. Derived once per
+ * (file, comment setting): entries that share a source file would otherwise
+ * re-normalize and re-hash every line of it.
+ */
+export interface ClaimLineData {
+  /** Raw lines of the file. */
+  lines: string[];
+  /** `lines` after claim normalization, parallel to `lines`. */
+  normalized: string[];
+  /** hashVersion 3 hash of each normalized line. */
+  hashes: string[];
+  /** hashVersion 1 hash of each raw line. */
+  legacy: string[];
+  /** Opening line index → closing line index, for every balanced block. */
+  blocks: Map<number, number>;
+}
+
 /** Per-operation source-file cache shared by status and baseline capture. */
 export class WorkspaceFileCache {
   private readonly files = new Map<string, Promise<CachedFile | null>>();
   private readonly contents = new Map<string, Promise<Buffer | null>>();
   private readonly hashes = new Map<string, string>();
   private readonly normalizedHashes = new Map<string, string>();
+  private readonly claimLinesCache = new Map<string, Promise<ClaimLineData | null>>();
+  private readonly blockHashCache = new Map<string, Promise<string[]>>();
 
   constructor(readonly root: string) {}
 
@@ -203,6 +223,57 @@ export class WorkspaceFileCache {
   async text(rel: string): Promise<string | null> {
     const raw = await this.read(rel);
     return raw?.toString("utf8") ?? null;
+  }
+
+  /**
+   * Normalized claim lines, their hashes, and the file's balanced blocks.
+   * Computed at most once per file and comment setting per operation; null
+   * when the file is unreadable.
+   */
+  claimData(rel: string, ignoreComments: boolean): Promise<ClaimLineData | null> {
+    const key = `${ignoreComments ? 1 : 0}\u0000${rel}`;
+    let pending = this.claimLinesCache.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const content = await this.text(rel);
+        if (content === null) return null;
+        const lines = content.split("\n");
+        const ext = path.extname(rel);
+        const normalized = normalizeClaimLines(lines, ext, ignoreComments);
+        return {
+          lines,
+          normalized,
+          hashes: normalized.map(normalizedLineHash),
+          legacy: lines.map(legacyLineHash),
+          blocks: findBlockEnds(lines, ext),
+        };
+      })();
+      this.claimLinesCache.set(key, pending);
+    }
+    return pending;
+  }
+
+  /**
+   * Composite hash of every balanced block in the file. Only computed when a
+   * block claim actually has to be matched.
+   */
+  blockClaimHashes(rel: string, ignoreComments: boolean): Promise<string[]> {
+    const key = `${ignoreComments ? 1 : 0}\u0000${rel}`;
+    let pending = this.blockHashCache.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const data = await this.claimData(rel, ignoreComments);
+        if (!data) return [];
+        const ext = path.extname(rel);
+        const out: string[] = [];
+        for (const [start, end] of data.blocks) {
+          out.push(blockHash(data.lines.slice(start, end + 1), ext, ignoreComments));
+        }
+        return out;
+      })();
+      this.blockHashCache.set(key, pending);
+    }
+    return pending;
   }
 
   private async sha256(rel: string): Promise<string | null> {
@@ -576,12 +647,10 @@ export async function claimLines(
   matcher = compileTokenMatcher(text),
 ): Promise<ClaimRegion[]> {
   if (matcher.size === 0) return [];
-  const content = await cache.text(rel);
-  if (content === null) return [];
+  const data = await cache.claimData(rel, ignoreComments);
+  if (!data) return [];
+  const { lines, normalized: normalizedLines, blocks: blockEnds } = data;
   const ext = path.extname(rel);
-  const lines = content.split("\n");
-  const normalizedLines = normalizeClaimLines(lines, ext, ignoreComments);
-  const blockEnds = findBlockEnds(lines, ext);
   const out: ClaimRegion[] = [];
   for (let i = 0; i < lines.length && out.length < cap; i++) {
     if (!matcher.test(ignoreComments ? normalizedLines[i] : lines[i])) continue;
@@ -603,23 +672,15 @@ export async function claimLines(
   return out;
 }
 
-/** Multisets of current line hashes, kept separate by hash version. */
-function currentLineHashes(
-  lines: string[],
-  ext?: string,
-  ignoreComments = false,
-): { legacy: Map<string, number>; normalized: Map<string, number> } {
-  const legacy = new Map<string, number>();
-  const normalized = new Map<string, number>();
-  const inc = (map: Map<string, number>, hash: string) =>
-    map.set(hash, (map.get(hash) ?? 0) + 1);
-  const normalizedLines = normalizeClaimLines(lines, ext, ignoreComments);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    inc(legacy, legacyLineHash(line));
-    inc(normalized, normalizedLineHash(normalizedLines[i]));
-  }
-  return { legacy, normalized };
+/**
+ * Hash multiset for one claim version. Built fresh for every call: matching
+ * consumes occurrences, so a shared multiset would let one entry's claims
+ * hide duplicates from another's.
+ */
+function countHashes(hashes: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const hash of hashes) counts.set(hash, (counts.get(hash) ?? 0) + 1);
+  return counts;
 }
 
 /** Consume one occurrence from a hash multiset. */
@@ -648,15 +709,12 @@ export async function findBrokenClaims(
   cache = new WorkspaceFileCache(root),
 ): Promise<ClaimRegion[]> {
   if (claims.length === 0) return [];
-  const content = await cache.text(rel);
-  if (content === null) return claims; // file gone → every claim is broken
-  const ext = path.extname(rel);
-  const lines = content.split("\n");
-  const present = currentLineHashes(lines, ext, ignoreComments);
+  const data = await cache.claimData(rel, ignoreComments);
+  if (!data) return claims; // file gone → every claim is broken
+  const present = { legacy: countHashes(data.legacy), normalized: countHashes(data.hashes) };
   const blockCounts = new Map<string, number>();
   if (claims.some((c) => c.kind === "block" && c.hashVersion === 3)) {
-    for (const [start, end] of findBlockEnds(lines, ext)) {
-      const hash = blockHash(lines.slice(start, end + 1), ext, ignoreComments);
+    for (const hash of await cache.blockClaimHashes(rel, ignoreComments)) {
       blockCounts.set(hash, (blockCounts.get(hash) ?? 0) + 1);
     }
   }
